@@ -75,3 +75,16 @@ Luca Cinema 0.7.0（4）Archive 和 App Store Connect 方式的 IPA 导出完成
 NAS 已使用 `local/movieclaw-chatgpt:0.37.0-20261013`，基于原始本地镜像加入此功能的后端、匹配的 API 目录、CLI 和 Web 产物。仅重建 MovieClaw，未重建 qBittorrent。Compose 与在线 SQLite 备份位于 NAS `/volume1/docker/movieclaw/chatgpt-build-20261013/backup`，数据库 quick_check 为 ok，部署后 MovieClaw 健康检查通过，现有供应商仍可读取，实际 NAS Web 已显示 ChatGPT 接入步骤。上游正式版本包含此功能前，普通官方镜像或应用内更新可能不含这个私人补丁；后续更新需要重新合入或确认上游已发布，不能将本地功能镜像误认为官方 Release。
 
 Mac 的 `~/.local/bin/mclaw` 已安装并通过用户批准的本机助手配对。认证文件按标准 CLI 位置保存，目录 0700、凭据 0600，未记录在项目或 PR。官方 OpenAI 页面已到达 Luca Cinema 授权步骤；NAS 中尚未创建 ChatGPT 供应商，待实际授权与一次推理/工具调用验证。
+
+
+## 0.7.0（4）TestFlight 上传完成（2026-10-13）
+
+用户在外出后明确改为 TestFlight 分发，复用上述 Archive 上传，没有重建 App 或改变版本号。Apple 已处理为 `VALID`，内部状态为 `IN_BETA_TESTING`，通过 Luca Personal 组的 builds relationship 确认本构建已在原内部组。现有唯一测试账号状态为 `INSTALLED`，此状态不能代替本版真机更新与功能验证。
+
+App ID 仍为 `6818384408`，本版 build ID 为 `0529f942-bca1-4a47-8c9d-c1bb0885967f`。中英文测试说明已写入并回读；源图标、实际编译图标以及 Apple CDN 图标均人工查看为 LC。未提交外部 Beta App Review，既有外部组未做新增分发。
+
+完整上传记录在构建目录的 `upload.log`、`asc-build-state.json` 与 `build-verification.json`。Xcode 自行生成到系统临时目录的分发诊断包已移至同一 SSD 构建目录；未在代码或 PR 中保存 Apple 凭据。
+
+官方 ChatGPT 接入入口已包含在本版，真实账号授权/订阅推理仍待完成，上游 PR 保持 Draft。待用户从 TestFlight 更新后进行 NAS 登录与实际播放验证。
+
+管理入口：https://appstoreconnect.apple.com/apps/6818384408/testflight/ios
