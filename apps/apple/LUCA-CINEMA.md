@@ -51,3 +51,9 @@ App Store Connect App ID：6818384408。构建 0.2.0（1）已上传，Apple 处
 ```bash
 LUCA_BUILD_NUMBER=3 apps/apple/scripts/luca-testflight.sh
 ```
+
+## 0.7.0 真机直装（2026-10-12）
+
+按用户指定，将同一 Archive 内的 Development 签名 App 直接更新安装到 `the silver sword`（iPhone 17 Pro Max）。设备安装清单确认从 0.5.0（1）更新为 0.7.0（3）；启动命令成功，随后查询确认 App 进程仍在运行。未卸载 App 或清空数据，未上传本版 TestFlight。
+
+设备通过 CoreDevice 可无线安装，但当前 sim-use 仅识别另一台已连接的 iPhone，无法读取此设备界面。因此登录状态、数据保留结果与 NAS 播放尚未实测。安装前后版本、安装结果、启动和进程记录保存在上述构建目录的 `sword-*.json` 中。
