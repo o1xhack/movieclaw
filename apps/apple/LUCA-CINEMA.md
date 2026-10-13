@@ -26,3 +26,28 @@ App Store Connect App ID：6818384408。构建 0.2.0（1）已上传，Apple 处
 基于官方 v0.30.0 标签，构建 0.3.0（2）已上传；Apple 状态 VALID，内部状态 IN_BETA_TESTING，已进入原 Luca Personal 组。保留独立品牌、完整许可证及修改声明；实际归档签名、资源和 Apple CDN 图标均已核验。尚未验证真机播放，未修改 NAS 或公网配置。片头片尾功能需服务端 v0.30.0 提供识别数据。
 
 本版源码位于 `/Volumes/StudioSSD/Projects/working/apple/LucaCinema`（分支 `luca-cinema-0.3.0`）；旧版工作目录保留。构建、IPA 与日志位于 `/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Luca-030-20261002`。
+
+
+## 0.7.0 完整上游同步与本地构建（2026-10-12）
+
+完整合入 MovieClaw v0.37.0（上游提交 e229717c43b2d48986f8f51c19b86348a527cb5a），本地分支为 `luca-cinema-0.7.0`，应用源码 merge commit 为 `f9f369d24da2a07e0c4c7f8d4dfcbe7b7a985bb6`。旧版品牌与本机打包配置已保存在 `luca-cinema-0.3.0` 分支与构建目录内的独立备份中。
+
+- 本地构建：Luca Cinema 0.7.0（3），最低 iOS 26；Archive 与 App Store Connect 方式的 IPA 导出成功。
+- 主 App 与两个通知扩展的签名全部验证通过；导出的推送环境为 production，App Group 为 `group.com.o1xhack.lucacinema.app`。
+- 已检查源图标与实际编译图标，均为 LC；图标无 Alpha。字体、App / 扩展 / AetherCore 的隐私清单与 MovieClaw 完整许可证均随包进入。
+- AetherEngine 固定提交为 `aa3e04fab1e48134267e7fc763db645b388c9cd6`，直接沿用上游 Package.resolved；7 项依赖锁定测试通过。
+- 推送代码与通知扩展已同步，但独立 Bundle ID 的实际推送仍需配置自己的 movieclaw-push 中继。
+- 本轮只做本地构建与导出，未上传 TestFlight；真机安装、NAS 登录与媒体播放尚未验证。
+
+产物与核验记录：
+
+- Archive：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Luca-070-20261013T035503Z/LucaCinema.xcarchive`
+- IPA：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Luca-070-20261013T035503Z/Export/LucaCinema-0.7.0-3.ipa`
+- 核验：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Luca-070-20261013T035503Z/build-verification.json`
+- IPA SHA-256：`3f43fbc276bd0fbb9d8ea4a8ab5db8e187c10d7af9dcd4d5b09ed0ed8e1f8ace`
+
+重新打包默认仅导出 IPA，显式添加 `--upload` 才上传；所有临时数据与 Xcode 分发日志使用 StudioSSD BuildScratch：
+
+```bash
+LUCA_BUILD_NUMBER=3 apps/apple/scripts/luca-testflight.sh
+```

@@ -21,7 +21,8 @@ repo,run=(Path(p).resolve() for p in sys.argv[1:])
 assert str(repo).startswith('/Volumes/StudioSSD/') and os.access(repo,os.W_OK)
 assert run.is_relative_to(Path('/Volumes/StudioSSD/Developer/BuildScratch'))
 PY
-mkdir -p "$run_dir"
+mkdir -p "$run_dir/Temp"
+export TMPDIR="$run_dir/Temp/"
 cd "$repo_dir"
 python3 scripts/prepare-project.py
 build="${LUCA_BUILD_NUMBER:-$(date -u +%Y%m%d%H%M)}"
