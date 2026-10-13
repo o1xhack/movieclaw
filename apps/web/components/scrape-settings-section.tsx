@@ -4,7 +4,7 @@
  * 「刮削与整理」设置分区（docs/design/scrape-customization.md §3）。
  *
  * 按"配置的是什么"分四个**并列** tab：元数据（语言优先级、分级地区）、
- * 图片（海报/背景语言优先级、门槛、质量档位）、命名与整理（模板 + 实时
+ * 图片（海报/背景语言优先级、门槛、本地图片画质）、命名与整理（模板 + 实时
  * 预览）、目录写入（图片/NFO/分集剧照三项细分开关）。排列顺序沿用刮削
  * 管线的先后，只为读起来顺；**四组之间没有依赖，可任意顺序配置**——
  * 所以不编号：编号会把并列关系伪装成"必须按序完成"的向导。
@@ -17,24 +17,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { BrandLoader } from "@/components/brand-loader";
+import { Toggle } from "@/components/cloud-push-ui";
+import { FanartKeyForm, fanartUsable, useFanartStatus } from "@/components/fanart-key-form";
 import { useToast } from "@/components/feedback";
 import { ChevronDownIcon } from "@/components/icons";
 import {
+  SETTINGS_BUTTON_CLASS,
+  SETTINGS_INPUT_CLASS,
+  SETTINGS_PRIMARY_BUTTON_CLASS,
+  SettingsList,
+  SettingsRow,
+  SettingsSection,
+} from "@/components/settings-ui";
+import {
   type CountryOption,
+  IMAGE_QUALITY_PRESETS,
+  type ImageQuality,
+  type ImageSource,
+  type ImageStorageEstimate,
   type LanguageOption,
   type ScrapeConfigView,
+  type ScrapeEffective,
   type ScrapeSetting,
+  getImageStorageEstimate,
   getScrapeConfig,
   listCountryOptions,
   listLanguageOptions,
   saveScrapeConfig,
 } from "@/lib/api/scrape";
 import { listLibraries } from "@/lib/api/libraries";
-
-const INPUT_CLASS =
-  "rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 py-2 text-sub " +
-  "text-[var(--text)] outline-none transition-colors placeholder:text-[var(--text-faint)] " +
-  "focus:border-[var(--accent)]/50";
 
 /** 排序芯片的候选项。id 是落库值（语言标签 / 地区码 / meta·orig·null token）。 */
 interface ChipOption {
@@ -78,10 +89,94 @@ const COMMON_CERT_COUNTRIES: ChipOption[] = [
   { id: "GB", name: "英国" },
 ];
 
-/** TMDB 图床合法档位（与后端 settings/metadata.py 的集合一致；空 = 跟随环境变量）。 */
+/** 可选的 TMDB 图床档位：后端 settings/metadata.py 合法集合里实用的那部分（过小的档位不提供）；
+ *  空 = 跟随上一级（全局设置页是环境变量，库设置页是全局设置）。 */
 const POSTER_SIZES = ["w342", "w500", "w780", "original"];
 const BACKDROP_SIZES = ["w780", "w1280", "original"];
 const STILL_SIZES = ["w185", "w300", "original"];
+/** 演职员头像：w185 手机网页够用，h632 电视也清楚，original 是 TMDB 原图 */
+const PROFILE_SIZES = ["w185", "h632", "original"];
+
+/** 「本地图片画质」四档的名字与一句话说明（docs/design/image-sizing.md §8.1）。 */
+const IMAGE_QUALITY_OPTIONS: { id: ImageQuality; title: string; desc: string }[] = [
+  { id: "original", title: "原图（默认）", desc: "所有图存 TMDB 原图，各设备都最清楚" },
+  { id: "standard", title: "标准", desc: "各设备都清楚，头像与海报不存原图，省约四成空间" },
+  { id: "compact", title: "节省空间", desc: "手机和网页够用；电视上剧照、头像会发虚" },
+  { id: "custom", title: "自定义", desc: "海报、背景、剧照、头像逐项指定 TMDB 档位" },
+];
+
+/** 自定义画质的四个档位下拉：字段、名字、可选档位 */
+const IMAGE_SIZE_FIELDS = [
+  { key: "poster_size", label: "海报", sizes: POSTER_SIZES },
+  { key: "backdrop_size", label: "背景", sizes: BACKDROP_SIZES },
+  { key: "still_size", label: "剧照", sizes: STILL_SIZES },
+  { key: "profile_size", label: "头像", sizes: PROFILE_SIZES },
+] as const;
+
+/** 画质卡管的字段：选档本身 + 自定义时的四个档位（库设置页按这一组整体跟随 / 覆盖） */
+const IMAGE_QUALITY_KEYS: (keyof ScrapeSetting)[] = [
+  "image_quality",
+  "poster_size",
+  "backdrop_size",
+  "still_size",
+  "profile_size",
+];
+
+/* ------------------------------------------------------------------ */
+/* 图片来源（docs/design/image-sources.md）                              */
+/* ------------------------------------------------------------------ */
+
+const SOURCE_LABEL: Record<ImageSource, string> = { tmdb: "TMDB", fanart: "Fanart.tv" };
+
+/** 「图片来源」卡管的字段：Fanart 开关 + 四类图的来源顺序（库设置页按这一组整体跟随/覆盖） */
+const SOURCE_KEYS: (keyof ScrapeSetting)[] = [
+  "fanart_enabled",
+  "poster_source_order",
+  "backdrop_source_order",
+  "logo_source_order",
+  "season_poster_source_order",
+];
+
+/** 来源顺序的四行：字段、名字、默认谁在前、默认值的理由（行下小字） */
+const SOURCE_ROWS = [
+  { key: "poster_source_order", label: "海报", first: "tmdb", why: "TMDB 在前" },
+  { key: "backdrop_source_order", label: "背景", first: "tmdb", why: "TMDB 在前（常有 4K）" },
+  { key: "logo_source_order", label: "片名 Logo", first: "fanart", why: "Fanart 在前（中文多）" },
+  { key: "season_poster_source_order", label: "季海报", first: "fanart", why: "Fanart 在前" },
+] as const;
+
+/** 来源卡的人话摘要：「TMDB + Fanart.tv · 片名 Logo、季海报优先 Fanart」/「仅 TMDB」 */
+function describeSources(setting: ScrapeSetting): string {
+  if (!setting.fanart_enabled) return "仅 TMDB";
+  const fanartFirst = SOURCE_ROWS.filter((row) => setting[row.key][0] === "fanart").map(
+    (row) => row.label,
+  );
+  const lead = fanartFirst.length
+    ? fanartFirst.length === SOURCE_ROWS.length
+      ? "全部优先 Fanart"
+      : `${fanartFirst.join("、")}优先 Fanart`
+    : "全部优先 TMDB";
+  return `TMDB + Fanart.tv · ${lead}`;
+}
+
+/** 估算字节数 → 「约 2.6 GB」；不足 1 GB 用 MB（取整），量级参考不需要更多精度 */
+function formatEstimate(bytes: number): string {
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 10) return `约 ${Math.round(gb)} GB`;
+  if (gb >= 1) return `约 ${gb.toFixed(1)} GB`;
+  return `约 ${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+}
+
+/** 画质档的人话摘要（折叠头用）：预设只说名字，自定义把四个档位列出来 */
+function describeImageQuality(setting: ScrapeSetting): string {
+  const option = IMAGE_QUALITY_OPTIONS.find((o) => o.id === setting.image_quality);
+  if (!option) return "按档位逐项跟随";
+  if (option.id !== "custom") return option.title.replace("（默认）", "");
+  const sizes = IMAGE_SIZE_FIELDS.map(
+    (field) => `${field.label} ${setting[field.key] || "跟随"}`,
+  ).join(" / ");
+  return `自定义（${sizes}）`;
+}
 
 /* ------------------------------------------------------------------ */
 /* 值的人话摘要（库设置页的折叠头与对照行用）                            */
@@ -117,12 +212,30 @@ export function describeScrapeValues(
         break;
       case "poster_mode":
         // 海报卡把「模式 + 语言优先级」并成一句：默认模式下语言优先级不生效，
-        // 摘要里再列它只会误导
+        // 摘要里再列它只会误导——启用 Fanart 时例外：TMDB 默认的那张要和 Fanart
+        // 的海报按语言优先级比，这时语言优先级是生效的
         parts.push(
           setting.poster_mode === "default"
-            ? "TMDB 默认"
+            ? setting.fanart_enabled
+              ? `TMDB 默认 · 与 Fanart 按 ${joinPriority(COMMON_IMAGE_LANGS, setting.poster_language_priority)} 比较`
+              : "TMDB 默认"
             : `按语言：${joinPriority(COMMON_IMAGE_LANGS, setting.poster_language_priority)}`,
         );
+        break;
+      case "fanart_enabled":
+        parts.push(describeSources(setting));
+        break;
+      case "poster_source_order":
+      case "backdrop_source_order":
+      case "logo_source_order":
+      case "season_poster_source_order":
+        // 并进 fanart_enabled 那一句（来源卡的四行顺序不逐条列）
+        if (!keys.includes("fanart_enabled")) {
+          parts.push(setting[key].map((source) => SOURCE_LABEL[source]).join(" → "));
+        }
+        break;
+      case "logo_language_priority":
+        parts.push(joinPriority(COMMON_IMAGE_LANGS, setting.logo_language_priority));
         break;
       case "poster_language_priority":
         if (!keys.includes("poster_mode")) {
@@ -142,11 +255,16 @@ export function describeScrapeValues(
           setting.backdrop_min_width > 0 ? `背景 ≥${setting.backdrop_min_width}` : "背景不限宽",
         );
         break;
+      case "image_quality":
+        parts.push(describeImageQuality(setting));
+        break;
       case "poster_size":
       case "backdrop_size":
-      case "still_size": {
+      case "still_size":
+      case "profile_size": {
+        // 和画质一起出现时由画质那一句表达（自定义会列出四个档位）；单独出现时
         // 三个档位并成一句「档位 …」，空串统一说成"跟随环境"
-        if (key !== "poster_size") break;
+        if (key !== "poster_size" || keys.includes("image_quality")) break;
         const sizes = [setting.poster_size, setting.backdrop_size, setting.still_size];
         parts.push(sizes.every((v) => !v) ? "档位跟随环境" : `档位 ${sizes.map((v) => v || "环境").join("/")}`);
         break;
@@ -289,7 +407,7 @@ function OrderChips({
       {moreOpen && (
         <div className="mt-2.5 rounded-xl border border-white/[0.12] bg-white/[0.04] p-3">
           <input
-            className={`${INPUT_CLASS} mb-2.5 w-full`}
+            className={`${SETTINGS_INPUT_CLASS} mb-2.5 w-full`}
             placeholder={`搜索${moreLabel}（名称或代码）…`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -444,6 +562,8 @@ export interface CardShell {
   customized: boolean;
   /** 卡片级三态开关；命名/目录写入走字段级三态，不传 */
   follow?: CardFollowState;
+  /** 折叠头右侧的一句即时反馈（全局页自动保存的「保存中… / 已保存」） */
+  note?: string;
 }
 
 export function Card({
@@ -470,7 +590,7 @@ export function Card({
   const effectiveFollow = shell?.follow ?? follow;
   const body = (
     <>
-      <p className="mb-4 mt-1 max-w-[62ch] text-sub text-[var(--text-muted)]">{desc}</p>
+      <p className="mb-4 max-w-[62ch] text-sub leading-5 text-[var(--text-muted)]">{desc}</p>
       {effectiveFollow && <CardFollowSwitch follow={effectiveFollow} />}
       {/* 跟随全局时控件只读：看得见全局值长什么样，但改不动。
           用 `inert` 而不是 `pointer-events-none`——后者只挡鼠标，键盘照样能
@@ -548,59 +668,59 @@ function CollapsibleCard({
   }, [shell.open]);
 
   return (
-    <section
-      ref={ref}
-      className="overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]"
-    >
-        <button
-          type="button"
-          aria-expanded={shell.open}
-          onClick={shell.onToggleOpen}
-          className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-white/[0.03]"
-        >
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-ui font-semibold">
-              {title}
-              {shell.customized && (
-                <span className="size-1.5 shrink-0 rounded-full bg-[var(--accent)]" aria-hidden />
-              )}
-              {/* 收起时也要看得见"这项被几个库改了"——它正是"在全局改了不生效"
-                  的答案，藏在展开态里等于没有 */}
-              {overriddenBy && overriddenBy.length > 0 && (
-                <span
-                  title={`${overriddenBy.join("、")}不跟随此处的设置`}
-                  className="rounded-full bg-[var(--accent-soft)] px-2 py-px text-micro font-normal text-[var(--accent)]"
-                >
-                  {overriddenBy.length} 个库已覆盖
-                </span>
-              )}
-            </span>
-            {/* 状态常显：不点开也知道这张卡是跟着全局还是本库自己配过 */}
-            <span
-              className={`mt-0.5 block truncate text-caption ${
-                shell.customized ? "text-[var(--accent)]" : "text-[var(--text-faint)]"
-              }`}
-            >
-              {shell.status}
-            </span>
+    <section ref={ref}>
+      <button
+        type="button"
+        aria-expanded={shell.open}
+        onClick={shell.onToggleOpen}
+        className="flex min-h-[56px] w-full items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-white/[0.03]"
+      >
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-body font-medium text-[var(--text)]">
+            {title}
+            {shell.customized && (
+              <span className="size-1.5 shrink-0 rounded-full bg-[var(--accent)]" aria-hidden />
+            )}
+            {/* 收起时也要看得见"这项被几个库改了"——它正是"在全局改了不生效"
+                的答案，藏在展开态里等于没有 */}
+            {overriddenBy && overriddenBy.length > 0 && (
+              <span
+                title={`${overriddenBy.join("、")}不跟随此处的设置`}
+                className="rounded-full bg-[var(--accent-soft)] px-2 py-px text-micro font-normal text-[var(--accent)]"
+              >
+                {overriddenBy.length} 个库已覆盖
+              </span>
+            )}
           </span>
-          <ChevronDownIcon
-            className={`size-4 shrink-0 text-[var(--text-faint)] transition-transform ${
-              shell.open ? "rotate-180" : ""
+          {/* 状态常显：不点开也知道这张卡是跟着全局还是本库自己配过 */}
+          <span
+            className={`mt-0.5 block truncate text-caption ${
+              shell.customized ? "text-[var(--accent)]" : "text-[var(--text-faint)]"
             }`}
-          />
-        </button>
-        <div
-          className={`grid transition-[grid-template-rows] duration-200 ease-out ${
-            shell.open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+          >
+            {shell.status}
+          </span>
+        </span>
+        {shell.note && (
+          <span className="shrink-0 text-caption text-[var(--text-faint)]">{shell.note}</span>
+        )}
+        <ChevronDownIcon
+          className={`size-4 shrink-0 text-[var(--text-faint)] transition-transform ${
+            shell.open ? "rotate-180" : ""
           }`}
-        >
-          <div className="overflow-hidden" inert={!shell.open}>
-            <div className="border-t border-white/[0.06] px-4 pb-4">{children}</div>
-          </div>
+        />
+      </button>
+      <div
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+          shell.open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
+      >
+        <div className="overflow-hidden" inert={!shell.open}>
+          <div className="px-4 pb-4">{children}</div>
         </div>
-      </section>
-    );
+      </div>
+    </section>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -632,7 +752,58 @@ function tokenValue(ctx: Record<string, unknown>, name: string, pad?: string): s
   return text;
 }
 
+/** 片名类占位符：同一模板里值相同的只保留第一次出现（「风筝 (风筝)」→「风筝」）。 */
+const TITLE_TOKENS = ["title", "original_title", "english_title"];
+/** 超长时可截短的自由文本占位符；编号、年份、规格不截。 */
+const SHRINKABLE_TOKENS = [...TITLE_TOKENS, "episode_title", "season_name", "release_name"];
+/** 单段名字字节上限与截短保底，与后端 MAX_SEGMENT_BYTES / _SHRINK_FLOOR_BYTES 一致。 */
+const MAX_SEGMENT_BYTES = 200;
+const SHRINK_FLOOR_BYTES = 30;
+const utf8Length = (text: string) => new TextEncoder().encode(text).length;
+
+/** 按 UTF-8 字节截断，不切坏多字节字符。 */
+function cutBytes(text: string, limit: number): string {
+  let out = "";
+  let used = 0;
+  for (const char of text) {
+    used += utf8Length(char);
+    if (used > limit) break;
+    out += char;
+  }
+  return out;
+}
+
+function dedupeTitles(template: string, ctx: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...ctx };
+  const seen = new Set<string>();
+  for (const m of template.matchAll(TOKEN_RE)) {
+    if (!TITLE_TOKENS.includes(m[1])) continue;
+    const value = tokenValue(next, m[1], m[2]).toLowerCase();
+    if (!value) continue;
+    if (seen.has(value)) next[m[1]] = null;
+    seen.add(value);
+  }
+  return next;
+}
+
 function renderTemplate(template: string, ctx: Record<string, unknown>): string {
+  // 片名去重 → 渲染 → 超长时逐个截短最长的自由文本（与后端 render 同序）
+  const context = dedupeTitles(template, ctx);
+  let text = renderOnce(template, context);
+  for (let i = 0; i < SHRINKABLE_TOKENS.length * 2; i++) {
+    const over = utf8Length(text) - MAX_SEGMENT_BYTES;
+    if (over <= 0) return text;
+    const sizes = SHRINKABLE_TOKENS.map((n) => [n, utf8Length(tokenValue(context, n))] as const);
+    const [name, size] = sizes.reduce((a, b) => (b[1] > a[1] ? b : a));
+    if (size <= SHRINK_FLOOR_BYTES) break;
+    const keep = Math.max(size - over, SHRINK_FLOOR_BYTES);
+    context[name] = cutBytes(tokenValue(context, name), keep).replace(/^[ .-]+|[ .-]+$/g, "");
+    text = renderOnce(template, context);
+  }
+  return sanitizeSegment(cutBytes(text, MAX_SEGMENT_BYTES)) || "未命名";
+}
+
+function renderOnce(template: string, ctx: Record<string, unknown>): string {
   // ① 占位符全空的括号组连同组内字面文本一起丢弃（收掉 "[tmdbid-]" 这种残留）
   const dropped = template.replace(BRACKET_GROUP_RE, (group) => {
     const tokens = [...group.matchAll(TOKEN_RE)];
@@ -654,8 +825,65 @@ function renderTemplate(template: string, ctx: Record<string, unknown>): string 
 }
 
 /** 模板字段定义：可用占位符与后端 naming.ALLOWED_TOKENS 一一对应。 */
-const COMMON_TOKENS = ["title", "original_title", "year", "tmdb_id", "imdb_id"];
-const FILE_ATTR_TOKENS = ["resolution", "media_source", "release_group"];
+const COMMON_TOKENS = [
+  "title",
+  "original_title",
+  "english_title",
+  "year",
+  "tmdb_id",
+  "imdb_id",
+  "douban_id",
+];
+const FILE_ATTR_TOKENS = [
+  "resolution",
+  "video_codec",
+  "hdr",
+  "bit_depth",
+  "audio",
+  "media_source",
+  "release_group",
+  "site",
+  "release_name",
+];
+
+/** 占位符按类别分组展示，按钮上写中文名（悬停看占位符原文）。 */
+const TOKEN_GROUPS: { label: string; tokens: Record<string, string> }[] = [
+  {
+    label: "片名与编号",
+    tokens: {
+      title: "片名",
+      original_title: "原名",
+      english_title: "英文名",
+      year: "年份",
+      tmdb_id: "TMDB ID",
+      imdb_id: "IMDb ID",
+      douban_id: "豆瓣 ID",
+    },
+  },
+  {
+    label: "季集",
+    tokens: { season: "季号", season_name: "季名", episode: "集号", episode_title: "集名" },
+  },
+  {
+    label: "文件规格",
+    tokens: {
+      resolution: "分辨率",
+      video_codec: "视频编码",
+      hdr: "HDR",
+      bit_depth: "位深",
+      audio: "音轨",
+    },
+  },
+  {
+    label: "来源",
+    tokens: {
+      media_source: "片源",
+      release_group: "发布组",
+      site: "站点",
+      release_name: "原始文件名",
+    },
+  },
+];
 
 const NAMING_FIELDS = [
   {
@@ -675,16 +903,23 @@ const NAMING_FIELDS = [
   {
     key: "naming_season_dir" as const,
     label: "季目录",
-    note: "必须包含 {season}",
+    note: "",
     fallback: "Season {season:02d}",
-    tokens: [...COMMON_TOKENS, "season"],
+    tokens: [...COMMON_TOKENS, "season", "season_name"],
   },
   {
     key: "naming_episode_file" as const,
     label: "剧集文件名",
-    note: "必须包含 {season} 与 {episode}",
+    note: "",
     fallback: "{title} ({year}) - S{season:02d}E{episode:02d}",
-    tokens: [...COMMON_TOKENS, ...FILE_ATTR_TOKENS, "season", "episode", "episode_title"],
+    tokens: [
+      ...COMMON_TOKENS,
+      ...FILE_ATTR_TOKENS,
+      "season",
+      "season_name",
+      "episode",
+      "episode_title",
+    ],
   },
 ];
 
@@ -692,46 +927,53 @@ const NAMING_FIELDS = [
 const SAMPLE_MOVIE = {
   title: "沙丘：第二部",
   original_title: "Dune: Part Two",
+  english_title: "Dune: Part Two",
   year: 2024,
   tmdb_id: 693134,
   imdb_id: "tt15239678",
+  douban_id: "35575567",
   resolution: "2160p",
+  video_codec: "HEVC",
+  hdr: "DV",
+  bit_depth: "10bit",
+  audio: "TrueHD Atmos 7.1",
   media_source: "BluRay",
   release_group: "FRDS",
+  site: "hdsky",
+  release_name: "Dune.Part.Two.2024.2160p.BluRay.DV.HEVC.TrueHD.7.1.Atmos-FRDS",
 };
 const SAMPLE_EPISODE = {
   title: "风筝",
   original_title: "风筝",
+  english_title: "Kite",
   year: 2017,
   tmdb_id: 68035,
   imdb_id: "tt6952510",
+  douban_id: "26340419",
   season: 1,
+  season_name: "第 1 季",
   episode: 3,
   episode_title: "延安来的姑娘",
   resolution: "1080p",
+  video_codec: "H.264",
+  hdr: null, // SDR：{hdr} 渲染为空，演示收缩
+  bit_depth: "8bit",
+  audio: "AAC 2.0",
   media_source: "WEB-DL",
   release_group: "CHDWEB",
+  site: "chdbits",
+  release_name: "Kite.2017.S01E03.1080p.WEB-DL.H264.AAC-CHDWEB",
 };
 
+type NamingValues = Pick<ScrapeSetting, (typeof NAMING_FIELDS)[number]["key"]>;
+
 /** 前端侧轻校验：与后端同口径，只为即时反馈；能否保存以后端返回为准。 */
-function templateError(key: string, template: string, allowed: string[]): string | null {
+function templateError(template: string, allowed: string[]): string | null {
   if (!template.trim()) return null; // 空 = 用默认模板
   if (/[\\/]/.test(template)) return "不能包含路径分隔符（目录层级是固定的）";
   const used = [...template.matchAll(TOKEN_RE)].map((m) => m[1]);
   const unknown = used.filter((t) => !allowed.includes(t));
   if (unknown.length) return `不可用的占位符：${unknown.map((t) => `{${t}}`).join("、")}`;
-  if (
-    (key === "naming_entry_dir" || key === "naming_movie_file") &&
-    !used.some((t) => t === "title" || t === "original_title")
-  ) {
-    return "必须包含 {title} 或 {original_title}，否则不同影片会重名";
-  }
-  if (key === "naming_season_dir" && !used.includes("season")) {
-    return "必须包含 {season}，否则不同季的同集号文件会互相覆盖";
-  }
-  if (key === "naming_episode_file" && !(used.includes("season") && used.includes("episode"))) {
-    return "必须包含 {season} 与 {episode}，否则同一部剧的多集会互相覆盖";
-  }
   return null;
 }
 
@@ -748,12 +990,24 @@ function NamingTab({
 }) {
   const [focused, setFocused] = useState<string>("naming_episode_file");
   const refs = useRef<Record<string, HTMLInputElement | null>>({});
+  // 模板是文本：边打字边存会把写到一半的模板落库，所以四个字段攒成草稿，
+  // 页脚「保存」一起提交（其余卡片是离散控件，改完即存）
+  // 只认这四个字段：别的卡片自动保存时 setting 会换新对象，不能因此冲掉草稿
+  const { naming_entry_dir, naming_movie_file, naming_season_dir, naming_episode_file } = setting;
+  const saved = useMemo<NamingValues>(
+    () => ({ naming_entry_dir, naming_movie_file, naming_season_dir, naming_episode_file }),
+    [naming_entry_dir, naming_movie_file, naming_season_dir, naming_episode_file],
+  );
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => setDraft(saved), [saved]);
+  const dirty = NAMING_FIELDS.some((f) => draft[f.key] !== saved[f.key]);
+  const edit = (changes: Partial<NamingValues>) => setDraft((current) => ({ ...current, ...changes }));
 
-  const errors = NAMING_FIELDS.map((f) => templateError(f.key, setting[f.key], f.tokens));
+  const errors = NAMING_FIELDS.map((f) => templateError(draft[f.key], f.tokens));
   const valid = errors.every((e) => e === null);
 
   const tpl = (key: (typeof NAMING_FIELDS)[number]["key"]) =>
-    setting[key].trim() || NAMING_FIELDS.find((f) => f.key === key)!.fallback;
+    draft[key].trim() || NAMING_FIELDS.find((f) => f.key === key)!.fallback;
 
   const moviePath = valid
     ? `${renderTemplate(tpl("naming_entry_dir"), SAMPLE_MOVIE)}/${renderTemplate(
@@ -773,11 +1027,11 @@ function NamingTab({
     const field = NAMING_FIELDS.find((f) => f.key === key);
     if (!field) return;
     const input = refs.current[key];
-    const current = setting[field.key] || field.fallback;
+    const current = draft[field.key] || field.fallback;
     const start = input?.selectionStart ?? current.length;
     const end = input?.selectionEnd ?? start;
     const next = `${current.slice(0, start)}{${token}}${current.slice(end)}`;
-    patch({ [field.key]: next } as Partial<ScrapeSetting>);
+    edit({ [field.key]: next });
     window.requestAnimationFrame(() => {
       const el = refs.current[key];
       if (!el) return;
@@ -819,10 +1073,10 @@ function NamingTab({
             }}
             spellCheck={false}
             placeholder={field.fallback}
-            value={setting[field.key]}
+            value={draft[field.key]}
             onFocus={() => setFocused(field.key)}
-            onChange={(e) => patch({ [field.key]: e.target.value } as Partial<ScrapeSetting>)}
-            className={`${INPUT_CLASS} w-full font-mono ${
+            onChange={(e) => edit({ [field.key]: e.target.value })}
+            className={`${SETTINGS_INPUT_CLASS} w-full font-mono ${
               errors[i] ? "border-[var(--danger)]/55" : ""
             }`}
           />
@@ -834,19 +1088,36 @@ function NamingTab({
         <p className="mb-1.5 text-micro uppercase tracking-widest text-[var(--text-faint)]">
           可用占位符（点击插入到「{focusedField.label}」）
         </p>
-        <div className="flex flex-wrap gap-1.5">
-          {focusedField.tokens.map((token) => (
-            <button
-              key={token}
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => insertToken(token)}
-              className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 font-mono text-caption text-[var(--accent-2)] transition-colors hover:bg-white/[0.07] hover:text-[var(--accent)]"
-            >
-              {`{${token}}`}
-            </button>
-          ))}
+        <div className="flex flex-col gap-2">
+          {TOKEN_GROUPS.map((group) => {
+            const tokens = Object.keys(group.tokens).filter((t) => focusedField.tokens.includes(t));
+            if (tokens.length === 0) return null;
+            return (
+              <div key={group.label} className="flex flex-wrap items-center gap-1.5">
+                <span className="w-16 shrink-0 text-caption text-[var(--text-faint)]">
+                  {group.label}
+                </span>
+                {tokens.map((token) => (
+                  <button
+                    key={token}
+                    type="button"
+                    title={`{${token}}`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => insertToken(token)}
+                    className="rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-caption text-[var(--accent-2)] transition-colors hover:bg-white/[0.07] hover:text-[var(--accent)]"
+                  >
+                    {group.tokens[token]}
+                  </button>
+                ))}
+              </div>
+            );
+          })}
         </div>
+        {focusedField.tokens.includes("site") && (
+          <p className="mt-2 text-caption text-[var(--text-faint)]">
+            站点与原始文件名只有经本系统入库的文件才有；存量扫描发现的文件这两项为空，会自动收缩。
+          </p>
+        )}
       </div>
 
       <div className="mt-4 overflow-hidden rounded-xl border border-white/[0.08]">
@@ -862,7 +1133,7 @@ function NamingTab({
           <div className="flex flex-col gap-3 overflow-x-auto px-3.5 py-3">
             <div>
               <p className="mb-1 text-caption text-[var(--text-faint)]">
-                电影 · 沙丘：第二部（2024）· 2160p BluRay FRDS
+                电影 · 沙丘：第二部（2024）· 2160p DV TrueHD Atmos · BluRay FRDS
               </p>
               <p className="whitespace-nowrap font-mono text-sub leading-relaxed">
                 <span className="text-[var(--text-faint)]">/media/电影/</span>
@@ -871,7 +1142,7 @@ function NamingTab({
             </div>
             <div>
               <p className="mb-1 text-caption text-[var(--text-faint)]">
-                剧集 · 风筝（2017）第 1 季第 3 集 · 1080p WEB-DL CHDWEB
+                剧集 · 风筝（2017）第 1 季第 3 集 · 1080p SDR AAC · WEB-DL CHDWEB
               </p>
               <p className="whitespace-nowrap font-mono text-sub leading-relaxed">
                 <span className="text-[var(--text-faint)]">/media/剧集/</span>
@@ -882,24 +1153,41 @@ function NamingTab({
         )}
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2.5">
+      <p className="mt-3 text-caption text-[var(--text-faint)]">
+        同条目多版本会自动追加「 - 版本标签」后缀，无需写进模板
+      </p>
+
+      {/* 卡片页脚：左边恢复默认（只改草稿），右边唯一的提交按钮 */}
+      <div className="-mx-4 -mb-4 mt-5 flex min-h-[52px] items-center justify-between gap-3 border-t border-[var(--line)] bg-black/20 px-4 py-2.5">
         <button
           type="button"
           onClick={() =>
-            patch({
+            edit({
               naming_entry_dir: "",
               naming_movie_file: "",
               naming_season_dir: "",
               naming_episode_file: "",
             })
           }
-          className="btn-glass rounded-lg px-3 py-1.5 text-sub"
+          className={SETTINGS_BUTTON_CLASS}
         >
           恢复默认模板
         </button>
-        <span className="text-caption text-[var(--text-faint)]">
-          同条目多版本会自动追加「 - 版本标签」后缀，无需写进模板
-        </span>
+        <div className="flex items-center gap-2">
+          {dirty && (
+            <button type="button" onClick={() => setDraft(saved)} className={SETTINGS_BUTTON_CLASS}>
+              放弃修改
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={!dirty || !valid}
+            onClick={() => patch(draft)}
+            className={SETTINGS_PRIMARY_BUTTON_CLASS}
+          >
+            保存
+          </button>
+        </div>
       </div>
     </Card>
   );
@@ -908,38 +1196,6 @@ function NamingTab({
 /* ------------------------------------------------------------------ */
 /* 目录写入                                                            */
 /* ------------------------------------------------------------------ */
-
-function Toggle({
-  checked,
-  onChange,
-  disabled,
-}: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <label className="relative inline-block h-[22px] w-[38px] shrink-0">
-      <input
-        type="checkbox"
-        className="peer absolute inset-0 z-10 m-0 cursor-pointer opacity-0 disabled:cursor-default"
-        checked={checked}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <span
-        className={`absolute inset-0 rounded-full transition-colors peer-disabled:opacity-35 ${
-          checked ? "bg-[var(--accent-2)]" : "bg-white/[0.12]"
-        }`}
-      />
-      <span
-        className={`pointer-events-none absolute top-0.5 size-[18px] rounded-full bg-[#e8ecf4] transition-transform ${
-          checked ? "translate-x-[18px]" : "translate-x-0.5"
-        }`}
-      />
-    </label>
-  );
-}
 
 const MIRROR_ROWS = [
   {
@@ -959,44 +1215,26 @@ const MIRROR_ROWS = [
   },
 ];
 
+/** 三个开关直接是行组里的三行：开关不需要折叠，改完即存 */
 function MirrorTab({
   setting,
   patch,
-  overriddenBy,
-  shellFor,
 }: {
   setting: ScrapeSetting;
   patch: (changes: Partial<ScrapeSetting>) => void;
-  overriddenBy?: (keys: (keyof ScrapeSetting)[]) => string[];
-  shellFor?: (title: string, keys: (keyof ScrapeSetting)[]) => CardShell;
 }) {
   return (
-    <Card
-      title="媒体目录写入"
-      overriddenBy={overriddenBy?.(MIRROR_ROWS.map((r) => r.key))}
-      shell={shellFor?.(
-        "媒体目录写入",
-        MIRROR_ROWS.map((r) => r.key),
-      )}
-      desc="把刮削成果写入媒体目录，反哺 Emby / Jellyfin / Kodi（文件名遵循播放器规范）。只增不删除；已存在的 NFO 绝不覆盖。每个媒体库还有一个总开关，关掉则该库三项都不写。"
-    >
-      <div className="divide-y divide-white/[0.06]">
-        {MIRROR_ROWS.map((row) => (
-          <div key={row.key} className="flex items-center justify-between gap-4 py-2.5">
-            <div>
-              <span className="text-ui font-medium">{row.label}</span>
-              <span className="mt-0.5 block max-w-[46ch] text-caption text-[var(--text-faint)]">
-                {row.hint}
-              </span>
-            </div>
-            <Toggle
-              checked={setting[row.key]}
-              onChange={(next) => patch({ [row.key]: next } as Partial<ScrapeSetting>)}
-            />
-          </div>
-        ))}
-      </div>
-    </Card>
+    <>
+      {MIRROR_ROWS.map((row) => (
+        <SettingsRow key={row.key} label={row.label} description={row.hint}>
+          <Toggle
+            checked={setting[row.key]}
+            label={row.label}
+            onChange={(next) => patch({ [row.key]: next } as Partial<ScrapeSetting>)}
+          />
+        </SettingsRow>
+      ))}
+    </>
   );
 }
 
@@ -1010,19 +1248,22 @@ function MirrorTab({
  * 全局页与库页各自调用一次即可——两处渲染的是同一批芯片，控件不同源
  * 会随时间漂移成两套交互（设计文档 §14.5：用户学一次就够）。
  */
-/** 分节标签 + 该节的卡片。标签不可点，只做视觉分组；全局页与库设置页共用。 */
+/** 小节标题 + 一个行组：每张折叠卡是组里的一行。全局页与库设置页共用。 */
 export function ScrapeSection({
   label,
+  description,
   children,
 }: {
   label: string;
+  description?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2">
-      <p className="text-micro uppercase tracking-widest text-[var(--text-faint)]">{label}</p>
-      {children}
-    </div>
+    <SettingsSection title={label} description={description}>
+      <div className="overflow-hidden rounded-xl">
+        <SettingsList>{children}</SettingsList>
+      </div>
+    </SettingsSection>
   );
 }
 
@@ -1120,27 +1361,349 @@ export function MetaTab({
   );
 }
 
+/**
+ * 「图片来源」卡（docs/design/image-sources.md）：TMDB 始终开启，Fanart.tv 可选。
+ *
+ * - **Fanart 开关**：Key 没配过时，点开关不会直接打开，而是就地展开 Key 表单
+ *   （FanartKeyForm），验证通过才打开——不内置 Key、不单开配置页；
+ * - **来源顺序**按图片类型分开排（⇄ 交换先后），只在同一档语言两边都有图时
+ *   起作用：规则写死成「先看语言，再看来源」，不给用户选；
+ * - 打开后在卡片里提示「已入库的条目需要手动刷新元数据」，不自动重刮。
+ *
+ * 全局页与库设置页共用；库设置页里 Key 一行改成「全站共用」的说明（凭据不跟库走）。
+ */
+function ImageSourcesCard({
+  setting,
+  patch,
+  library,
+  overriddenBy,
+  shellFor,
+}: {
+  setting: ScrapeSetting;
+  patch: (changes: Partial<ScrapeSetting>) => void;
+  library: boolean;
+  overriddenBy?: (keys: (keyof ScrapeSetting)[]) => string[];
+  shellFor?: (title: string, keys: (keyof ScrapeSetting)[]) => CardShell;
+}) {
+  const { status, setStatus } = useFanartStatus();
+  const [keyForm, setKeyForm] = useState(false);
+  // 刚打开 Fanart：卡片里提示存量条目要手动刷新（关掉、或关闭提示即消失）
+  const [justEnabled, setJustEnabled] = useState(false);
+  const enabled = setting.fanart_enabled;
+  const usable = fanartUsable(status);
+
+  const toggle = () => {
+    if (enabled) {
+      patch({ fanart_enabled: false });
+      setJustEnabled(false);
+    } else if (usable) {
+      patch({ fanart_enabled: true });
+      setJustEnabled(true);
+    } else {
+      // 没有可用的 Key：开关保持关，先就地填一次
+      setKeyForm((current) => !current);
+    }
+  };
+
+  const pill = !status?.configured ? (
+    <span className="rounded-full border border-[var(--warn)]/30 px-2 py-px text-micro font-normal text-[var(--warn)]">
+      需要 API Key
+    </span>
+  ) : status.key_invalid ? (
+    <span className="rounded-full border border-[var(--danger)]/35 px-2 py-px text-micro font-normal text-[var(--danger)]">
+      Key 已失效
+    </span>
+  ) : (
+    <span className="rounded-full border border-[var(--ok)]/30 px-2 py-px text-micro font-normal text-[var(--ok)]">
+      Key 已配置
+    </span>
+  );
+
+  return (
+    <Card
+      title="图片来源"
+      overriddenBy={overriddenBy?.(SOURCE_KEYS)}
+      shell={shellFor?.("图片来源", SOURCE_KEYS)}
+      desc="海报、背景、片名 Logo、季海报可以从多个图库挑选。TMDB 是元数据的主来源，始终开启；Fanart.tv 是社区维护的高清图库，中文片名 Logo、季海报往往比 TMDB 全。你在条目详情页手动选定的图始终优先，不受这里影响。"
+    >
+      {justEnabled && enabled && (
+        <div className="mb-2.5 flex items-start gap-2.5 rounded-xl border border-[var(--info)]/30 bg-[var(--info)]/[0.07] px-3 py-2.5 text-caption leading-relaxed text-[var(--text-muted)]">
+          <span className="text-[var(--info)]">ℹ︎</span>
+          <span className="min-w-0 flex-1">
+            <strong className="font-semibold text-[var(--text)]">Fanart.tv 已启用。</strong>
+            之后新入库的条目会自动用上；
+            <strong className="font-semibold text-[var(--text)]">
+              已入库的条目需要你在媒体库执行「刷新元数据」
+            </strong>
+            后才会按新来源重选图片，不刷新就保持原样。
+          </span>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            onClick={() => setJustEnabled(false)}
+            className="shrink-0 text-[var(--text-faint)] hover:text-[var(--text)]"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <div className="mb-2 flex items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.025] px-3 py-2.5">
+        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--src-tmdb)]/[0.14] text-micro font-extrabold tracking-tight text-[var(--src-tmdb)]">
+          TMDB
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-ui font-semibold">TMDB</span>
+          <span className="block text-caption text-[var(--text-faint)]">元数据与图片的主来源</span>
+        </span>
+        <span className="shrink-0 rounded-full border border-white/[0.08] px-2 py-px text-micro text-[var(--text-faint)]">
+          始终开启
+        </span>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.025]">
+        <div className="flex items-center gap-3 px-3 py-2.5">
+          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--src-fanart)]/[0.14] text-micro font-extrabold text-[var(--src-fanart)]">
+            FA
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-2 text-ui font-semibold">
+              Fanart.tv {pill}
+            </span>
+            <span className="block text-caption text-[var(--text-faint)]">
+              {status?.configured
+                ? library
+                  ? "Key 全站共用，在「设置 → 刮削与整理」里可以更换"
+                  : "社区高清图库 · 电影按 TMDB 编号、剧集按 TVDB 编号取图（TVDB 编号从 TMDB 自动获取）"
+                : "社区高清图库 · 打开开关时填一次你自己的 API Key 即可"}
+            </span>
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            aria-label="启用 Fanart.tv"
+            onClick={toggle}
+            className={`relative h-[21px] w-9 shrink-0 rounded-full transition-colors ${
+              enabled ? "bg-[var(--accent-2)]" : "bg-white/[0.14]"
+            }`}
+          >
+            <span
+              className={`absolute left-[2.5px] top-[2.5px] size-4 rounded-full bg-white transition-transform ${
+                enabled ? "translate-x-[15px]" : ""
+              }`}
+            />
+          </button>
+        </div>
+        {keyForm && (
+          <FanartKeyForm
+            variant={library ? "library" : "global"}
+            className="mx-3 mb-3"
+            onVerified={(next) => {
+              setStatus(next);
+              setKeyForm(false);
+              patch({ fanart_enabled: true });
+              setJustEnabled(true);
+            }}
+            onCancel={() => setKeyForm(false)}
+          />
+        )}
+        {!keyForm && status?.configured && (
+          <div className="flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] px-3 py-2 pl-14 text-caption text-[var(--text-faint)] max-sm:pl-3">
+            {status.key_invalid ? (
+              <span className="text-[var(--danger)]">
+                Fanart.tv 拒绝了这个 Key（可能已撤销或填错），已暂停使用 Fanart 选图
+              </span>
+            ) : (
+              <span>
+                API Key <code className="font-mono text-[var(--text-muted)]">••••{status.key_hint}</code>
+              </span>
+            )}
+            {(!library || status.key_invalid) && (
+              <button
+                type="button"
+                onClick={() => setKeyForm(true)}
+                className="text-[var(--accent)] underline underline-offset-2"
+              >
+                {status.key_invalid ? "重新填写" : "更换"}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <p className="mb-1.5 mt-4 flex flex-wrap items-baseline gap-2 text-sub font-semibold">
+        来源顺序
+        <span className="text-caption font-normal text-[var(--text-faint)]">
+          每种图单独排，点 ⇄ 交换先后
+        </span>
+      </p>
+      <div
+        className={`overflow-hidden rounded-xl border border-white/[0.08] ${enabled ? "" : "opacity-40"}`}
+      >
+        {SOURCE_ROWS.map((row) => {
+          const order = setting[row.key];
+          const isDefault = order[0] === row.first;
+          const note =
+            row.key === "poster_source_order" && setting.poster_mode === "default"
+              ? "海报卡是「TMDB 默认」：TMDB 只出它指定的那一张，和 Fanart 的海报按语言比"
+              : row.key === "season_poster_source_order"
+                ? "只对剧集生效；语言跟随海报卡"
+                : null;
+          return (
+            <div
+              key={row.key}
+              className="grid grid-cols-[86px_1fr_auto] items-center gap-x-2.5 gap-y-1 border-t border-white/[0.06] px-3 py-2 first:border-t-0"
+            >
+              <span className="text-sub text-[var(--text)]">
+                {row.label}
+                <span
+                  className={`block text-micro ${isDefault ? "text-[var(--src-fanart)]" : "text-[var(--text-faint)]"}`}
+                >
+                  {isDefault ? `默认 · ${row.why}` : "已调整"}
+                </span>
+              </span>
+              <span className="flex flex-wrap items-center gap-1.5">
+                {order.map((source, index) => (
+                  <span key={source} className="flex items-center gap-1.5">
+                    {index > 0 && <span className="text-caption text-[var(--text-faint)]">→</span>}
+                    <span
+                      className={`flex items-center gap-1.5 rounded-full border border-[var(--accent-2)]/40 bg-[var(--accent-soft)] py-0.5 pl-1 pr-2.5 text-sub ${
+                        source === "fanart" && !enabled ? "line-through opacity-50" : ""
+                      }`}
+                    >
+                      <span
+                        className={`grid size-4 place-items-center rounded-full text-[9.5px] font-extrabold text-[#0a0b10] ${
+                          source === "tmdb" ? "bg-[var(--src-tmdb)]" : "bg-[var(--src-fanart)]"
+                        }`}
+                      >
+                        {index + 1}
+                      </span>
+                      {SOURCE_LABEL[source]}
+                    </span>
+                  </span>
+                ))}
+              </span>
+              <button
+                type="button"
+                disabled={!enabled}
+                aria-label={`交换${row.label}的来源先后`}
+                onClick={() => patch({ [row.key]: [...order].reverse() } as Partial<ScrapeSetting>)}
+                className="rounded-lg bg-white/[0.06] px-2.5 py-1 text-sub text-[var(--text-muted)] transition-colors hover:bg-white/[0.12] hover:text-[var(--text)] disabled:pointer-events-none disabled:opacity-30"
+              >
+                ⇄
+              </button>
+              {note && (
+                <span className="col-start-2 col-end-4 text-micro text-[var(--text-faint)]">{note}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-2.5 rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2.5 text-caption leading-relaxed text-[var(--text-muted)]">
+        <strong className="font-semibold text-[var(--text)]">先看语言，再看来源。</strong>
+        每种图按自己的语言优先级（海报、背景、片名 Logo 卡里配置）逐档找；同一档语言两个来源都有图时，才按上面的来源顺序挑。所以把中文排第一，就不会因为来源顺序拿到英文图。
+      </p>
+    </Card>
+  );
+}
+
+/** 像素门槛输入：打字时只改本地草稿，失焦或回车才提交（不把「1」「10」这些中间值存下来） */
+function WidthInput({ value, onCommit }: { value: number; onCommit: (next: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const next = Math.max(0, Math.round(Number(draft) || 0));
+    setDraft(String(next));
+    if (next !== value) onCommit(next);
+  };
+  return (
+    <input
+      type="number"
+      min={0}
+      step={100}
+      className={`${SETTINGS_INPUT_CLASS} w-24 tabular-nums`}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+    />
+  );
+}
+
 export function ImagesTab({
   setting,
   patch,
   extraImageLangs,
   effective,
+  estimate = null,
+  inheritsGlobal = false,
   overriddenBy,
   shellFor,
 }: {
   setting: ScrapeSetting;
   patch: (changes: Partial<ScrapeSetting>) => void;
   extraImageLangs: ChipOption[];
-  /** 档位下拉的「跟随环境」提示值；库设置页传全局生效值 */
-  effective: Pick<ScrapeSetting, "poster_size" | "backdrop_size" | "still_size"> | null;
+  /** 已保存配置的生效值（画质档、四个档位）；库设置页传全局生效值 */
+  effective: ScrapeEffective | null;
+  /**
+   * 各画质档的磁盘估算（全局设置页传）。库设置页不传：估算按全站的图片张数算，
+   * 放在单个库的覆盖里会让人以为是这个库的量
+   */
+  estimate?: ImageStorageEstimate | null;
+  /** 库设置页：留空跟随的是全局设置（后端把库覆盖里的空值当「没覆盖」） */
+  inheritsGlobal?: boolean;
   overriddenBy?: (keys: (keyof ScrapeSetting)[]) => string[];
   shellFor?: (title: string, keys: (keyof ScrapeSetting)[]) => CardShell;
 }) {
-  const sizeHint = (value: string, fallback: string) =>
-    value === "" ? `跟随环境变量（当前 ${fallback}）` : value;
+  // 界面选中的画质档：显式选过就是它，没选过按已保存配置反推（后端 effective 给）
+  const quality: ImageQuality = setting.image_quality || effective?.image_quality || "original";
+  // 档位下拉留空的含义：全局页是环境变量，库页是全局设置。留空的实际档位只有在
+  // 已保存配置本身就是「自定义」时才等于 effective 里的值（选了预设时 effective
+  // 是预设的档位，不是留空会落到的值），其它时候不写数字，免得说错
+  const fallbackKnown = effective?.image_quality === "custom";
+  const inheritLabel = (fallback: string) => {
+    const base = inheritsGlobal ? "跟随全局" : "跟随环境变量";
+    return fallbackKnown && fallback ? `${base}（${fallback}）` : base;
+  };
+  const chooseQuality = (next: ImageQuality) => {
+    if (next !== "custom") {
+      patch({ image_quality: next });
+      return;
+    }
+    // 切到自定义：把刚才那一档的四个档位填进下拉，从用户看到的效果起步微调
+    patch(
+      quality === "custom"
+        ? { image_quality: "custom" }
+        : { image_quality: "custom", ...IMAGE_QUALITY_PRESETS[quality] },
+    );
+  };
+  // 自定义档的估算只有在「已保存的就是自定义、且四个档位没改过」时才准
+  // （估算按已保存配置算）；改了下拉就提示保存后再看
+  const customEstimateFresh =
+    estimate?.current_quality === "custom" &&
+    effective?.image_quality === "custom" &&
+    IMAGE_SIZE_FIELDS.every(
+      (field) => (setting[field.key] || effective[field.key]) === effective[field.key],
+    );
+  const estimateText = (id: ImageQuality): string | null => {
+    if (!estimate) return null;
+    if (id !== "custom") return `按当前媒体库估算${formatEstimate(estimate.presets[id])}`;
+    if (quality !== "custom") return null;
+    return customEstimateFresh
+      ? `按当前媒体库估算${formatEstimate(estimate.current_bytes)}`
+      : "保存后按所选档位估算";
+  };
 
   return (
     <>
+      <ImageSourcesCard
+        setting={setting}
+        patch={patch}
+        library={inheritsGlobal}
+        overriddenBy={overriddenBy}
+        shellFor={shellFor}
+      />
       <Card
         title="海报"
         overriddenBy={overriddenBy?.(["poster_mode", "poster_language_priority"])}
@@ -1184,8 +1747,14 @@ export function ImagesTab({
             </label>
           ))}
         </div>
+        {/* 默认模式下语言优先级本不生效（置灰）；启用 Fanart 时 TMDB 默认的那张要和
+            Fanart 的海报按它比较，所以要能编辑 */}
         <div
-          className={`mt-4 ${setting.poster_mode === "language" ? "" : "pointer-events-none opacity-40"}`}
+          className={`mt-4 ${
+            setting.poster_mode === "language" || setting.fanart_enabled
+              ? ""
+              : "pointer-events-none opacity-40"
+          }`}
         >
           <OrderChips
             options={COMMON_IMAGE_LANGS}
@@ -1196,6 +1765,12 @@ export function ImagesTab({
             primaryTag="首选"
             onChange={(next) => patch({ poster_language_priority: next })}
           />
+          {setting.poster_mode === "default" && setting.fanart_enabled && (
+            <p className="mt-2 text-caption leading-relaxed text-[var(--text-faint)]">
+              已启用 Fanart.tv：TMDB 默认的那张海报会和 Fanart 的海报按上面的语言优先级比较，Fanart
+              有更靠前语言的海报时才会换掉它。季海报同样按这个语言优先级挑。
+            </p>
+          )}
         </div>
       </Card>
       <Card
@@ -1215,84 +1790,106 @@ export function ImagesTab({
         />
       </Card>
       <Card
-        title="质量与门槛"
-        overriddenBy={overriddenBy?.([
-          "poster_min_width",
-          "backdrop_min_width",
-          "poster_size",
-          "backdrop_size",
-          "still_size",
-        ])}
-        shell={shellFor?.("质量与门槛", [
-          "poster_min_width",
-          "backdrop_min_width",
-          "poster_size",
-          "backdrop_size",
-          "still_size",
-        ])}
-        desc="分辨率门槛过滤模糊候选图；质量档位决定下载到本地的图片尺寸，调低可显著节省磁盘，改动后整库刷新会按新档位自动重下。"
+        title="片名 Logo"
+        overriddenBy={overriddenBy?.(["logo_language_priority"])}
+        shell={shellFor?.("片名 Logo", ["logo_language_priority"])}
+        desc="详情页、首页大图上叠在背景图上的片名字标（透明底）。按顺序逐档找第一张有图的语言；全部落空就不显示 Logo，改为显示文字标题。"
       >
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-3">
-          <div>
-            <span className="text-ui font-medium">最低分辨率门槛</span>
-            <span className="mt-0.5 block text-caption text-[var(--text-faint)]">
-              低于门槛的候选图不选；候选全部不达标时自动放宽
+        <OrderChips
+          options={COMMON_IMAGE_LANGS}
+          extraOptions={extraImageLangs}
+          moreLabel="语言"
+          value={setting.logo_language_priority}
+          max={4}
+          primaryTag="首选"
+          onChange={(next) => patch({ logo_language_priority: next })}
+        />
+      </Card>
+      <Card
+        title="最低分辨率门槛"
+        overriddenBy={overriddenBy?.(["poster_min_width", "backdrop_min_width"])}
+        shell={shellFor?.("最低分辨率门槛", ["poster_min_width", "backdrop_min_width"])}
+        desc="管的是「选哪张图」：低于门槛的候选图不选，候选全部不达标时自动放宽。图片存多大由下面的「本地图片画质」决定。"
+      >
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2.5 text-sub text-[var(--text-muted)]">
+          {(
+            [
+              ["poster_min_width", "海报"],
+              ["backdrop_min_width", "背景"],
+            ] as const
+          ).map(([key, label]) => (
+            <span key={key} className="flex items-center gap-1.5">
+              {label} ≥
+              <WidthInput value={setting[key]} onCommit={(next) => patch({ [key]: next })} />
+              {/* 0 在输入框里看不出是"不限制"还是"没填"，补一句 */}
+              {setting[key] === 0 && (
+                <span className="text-caption text-[var(--text-faint)]">不限制</span>
+              )}
             </span>
-          </div>
-          <div className="flex items-center gap-2.5 text-sub text-[var(--text-muted)]">
-            {(
-              [
-                ["poster_min_width", "海报"],
-                ["backdrop_min_width", "背景"],
-              ] as const
-            ).map(([key, label]) => (
-              <span key={key} className="flex items-center gap-1.5">
-                {label} ≥
-                <input
-                  type="number"
-                  min={0}
-                  step={100}
-                  className={`${INPUT_CLASS} w-24 tabular-nums`}
-                  value={setting[key]}
-                  onChange={(e) => patch({ [key]: Number(e.target.value) || 0 })}
-                />
-                {/* 0 在输入框里看不出是"不限制"还是"没填"，补一句 */}
-                {setting[key] === 0 && (
-                  <span className="text-caption text-[var(--text-faint)]">不限制</span>
-                )}
-              </span>
-            ))}
-          </div>
+          ))}
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-3">
-          <span className="text-ui font-medium">图片质量档位</span>
-          <div className="flex flex-wrap gap-2">
-            {(
-              [
-                ["poster_size", "海报", POSTER_SIZES, effective?.poster_size],
-                ["backdrop_size", "背景", BACKDROP_SIZES, effective?.backdrop_size],
-                ["still_size", "剧照", STILL_SIZES, effective?.still_size],
-              ] as const
-            ).map(([key, label, sizes, fallback]) => (
-              <select
-                key={key}
-                className={INPUT_CLASS}
-                value={setting[key]}
-                title={sizeHint(setting[key], fallback ?? "")}
-                onChange={(e) => patch({ [key]: e.target.value } as Partial<ScrapeSetting>)}
+      </Card>
+      <Card
+        title="本地图片画质"
+        overriddenBy={overriddenBy?.(IMAGE_QUALITY_KEYS)}
+        shell={shellFor?.("本地图片画质", IMAGE_QUALITY_KEYS)}
+        desc="刮削时存到本地的图片有多大。各设备看图时由服务端从这份本地图按需缩小，所以这里只决定「最清楚能到多清楚」。改了画质，存量图片在媒体库「刷新元数据」后按新画质更新。"
+      >
+        <div className="grid gap-2 md:grid-cols-2">
+          {IMAGE_QUALITY_OPTIONS.map((option) => {
+            const hint = estimateText(option.id);
+            return (
+              <label
+                key={option.id}
+                className={`cursor-pointer rounded-xl border p-3 transition-colors ${
+                  quality === option.id
+                    ? "border-[var(--accent-2)] bg-[var(--accent-soft)]"
+                    : "border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.07]"
+                }`}
               >
-                <option value="">
-                  {label} · 跟随环境（{fallback}）
-                </option>
-                {sizes.map((size) => (
-                  <option key={size} value={size}>
-                    {label} · {size}
-                  </option>
-                ))}
-              </select>
+                <input
+                  type="radio"
+                  // 库设置页与全局页不会同屏，但同页多实例时 name 也不该串组
+                  name={inheritsGlobal ? "image-quality-library" : "image-quality"}
+                  className="sr-only"
+                  checked={quality === option.id}
+                  onChange={() => chooseQuality(option.id)}
+                />
+                <span className="flex flex-wrap items-baseline justify-between gap-x-2">
+                  <span className="text-ui font-semibold">{option.title}</span>
+                  {hint && (
+                    <span className="tnum text-caption text-[var(--text-muted)]">{hint}</span>
+                  )}
+                </span>
+                <span className="mt-0.5 block text-caption text-[var(--text-faint)]">
+                  {option.desc}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+        {/* 自定义才展开四个档位；预设下档位字段被后端忽略，摆出来只会让人以为还能改 */}
+        {quality === "custom" && (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {IMAGE_SIZE_FIELDS.map((field) => (
+              <label key={field.key} className="flex flex-col gap-1">
+                <span className="text-caption text-[var(--text-muted)]">{field.label}</span>
+                <select
+                  className={SETTINGS_INPUT_CLASS}
+                  value={setting[field.key]}
+                  onChange={(e) => patch({ [field.key]: e.target.value } as Partial<ScrapeSetting>)}
+                >
+                  <option value="">{inheritLabel(effective?.[field.key] ?? "")}</option>
+                  {field.sizes.map((size) => (
+                    <option key={size} value={size}>
+                      {size === "original" ? "original（原图）" : size}
+                    </option>
+                  ))}
+                </select>
+              </label>
             ))}
           </div>
-        </div>
+        )}
       </Card>
     </>
   );
@@ -1311,8 +1908,22 @@ export function ScrapeSettingsSection() {
   // 一屏能扫完全站配置（用户决策 2026-08-30：与库设置页形态完全一致）
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [dirty, setDirty] = useState(false);
+  // 自动保存的状态：显示在展开的那一行右侧（「保存中… / 已保存」）
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  // 最新的编辑值与待发的保存：连续点芯片时合并成一次请求，只采纳最后一次的响应
+  const latest = useRef<ScrapeSetting | null>(null);
+  const timer = useRef<number | null>(null);
+  const seq = useRef(0);
+  // 「本地图片画质」各档的磁盘估算；拉不到（非管理员、网络）就不显示数字，设置照常可用
+  const [estimate, setEstimate] = useState<ImageStorageEstimate | null>(null);
+  const loadEstimate = useCallback(() => {
+    getImageStorageEstimate()
+      .then(setEstimate)
+      .catch(() => setEstimate(null));
+  }, []);
+  useEffect(() => {
+    loadEstimate();
+  }, [loadEstimate]);
 
   const load = useCallback(async () => {
     setError(null);
@@ -1321,13 +1932,13 @@ export function ScrapeSettingsSection() {
       setView(config);
       // 编辑态用"生效值"起步：跟随 env 的空列表在界面上就是当前生效的语言，
       // 用户看到的即所得；未改动不保存则语义不变
-      setSetting({
+      latest.current = {
         ...config.setting,
         language_priority: config.setting.language_priority.length
           ? config.setting.language_priority
           : config.effective.language_priority,
-      });
-      setDirty(false);
+      };
+      setSetting(latest.current);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载失败，请重试");
     }
@@ -1357,12 +1968,24 @@ export function ScrapeSettingsSection() {
     (title: string, keys: (keyof ScrapeSetting)[]): CardShell => ({
       open: open === title,
       onToggleOpen: () => setOpen((current) => (current === title ? null : title)),
+      note:
+        open === title && saveState !== "idle"
+          ? saveState === "saving"
+            ? "保存中…"
+            : "已保存"
+          : undefined,
       // 全局页没有"跟随/覆盖"这个静默态（它就是被跟随的那一层），折叠头只报
       // 当前值；点亮与否交给「N 个库已覆盖」徽标表达
       customized: false,
-      status: setting ? describeScrapeValues(keys, setting) : "",
+      // 画质没选过（空串）时按已保存配置反推的那一档来说，与卡片里选中的一致
+      status: setting
+        ? describeScrapeValues(keys, {
+            ...setting,
+            image_quality: setting.image_quality || view?.effective.image_quality || "",
+          })
+        : "",
     }),
-    [open, setting],
+    [open, setting, view, saveState],
   );
 
   const overriddenBy = useCallback(
@@ -1373,26 +1996,60 @@ export function ScrapeSettingsSection() {
     [libraryOverrides],
   );
 
-  const patch = useCallback((changes: Partial<ScrapeSetting>) => {
-    setSetting((current) => (current ? { ...current, ...changes } : current));
-    setDirty(true);
-  }, []);
-
-  const save = useCallback(async () => {
-    if (!setting) return;
-    setSaving(true);
+  const persist = useCallback(async () => {
+    timer.current = null;
+    const current = latest.current;
+    if (!current) return;
+    const mine = ++seq.current;
+    setSaveState("saving");
     try {
-      const config = await saveScrapeConfig(setting);
+      const config = await saveScrapeConfig(current);
+      if (mine !== seq.current) return;
+      // 不拿响应覆盖编辑值：请求在路上时用户可能又改了别的
       setView(config);
-      setSetting(config.setting);
-      setDirty(false);
-      toast.success("已保存。语言与图片对存量条目生效需在媒体库执行整库刷新");
+      setSaveState("saved");
+      // 估算里「自定义」那一档按已保存配置算，保存后重取
+      loadEstimate();
     } catch (err) {
+      if (mine !== seq.current) return;
+      setSaveState("idle");
       toast.error(err instanceof Error ? err.message : "保存失败，请重试");
-    } finally {
-      setSaving(false);
+      // 失败不猜怎么回滚，重读服务端的真实值
+      void load();
     }
-  }, [setting, toast]);
+  }, [toast, loadEstimate, load]);
+
+  // 「已保存」停留两秒后收起
+  useEffect(() => {
+    if (saveState !== "saved") return;
+    const id = window.setTimeout(() => setSaveState("idle"), 2000);
+    return () => window.clearTimeout(id);
+  }, [saveState]);
+
+  // 离开页面时还没发出去的改动立刻发掉
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+  useEffect(
+    () => () => {
+      if (timer.current !== null) {
+        window.clearTimeout(timer.current);
+        void persistRef.current();
+      }
+    },
+    [],
+  );
+
+  /** 改完即存：控件都是离散的（芯片、单选、开关、下拉），没有写到一半的中间态 */
+  const patch = useCallback(
+    (changes: Partial<ScrapeSetting>) => {
+      if (!latest.current) return;
+      latest.current = { ...latest.current, ...changes };
+      setSetting(latest.current);
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => void persist(), 400);
+    },
+    [persist],
+  );
 
   if (error) {
     return (
@@ -1413,20 +2070,22 @@ export function ScrapeSettingsSection() {
     );
   }
 
+  const mirrorOverrides = overriddenBy(MIRROR_ROWS.map((row) => row.key));
+
   return (
-    <div className="space-y-5">
+    <div className="space-y-10">
       {/* 「可按库覆盖」这件事在分区顶部统一说一句：P4 之后所有字段都能按库
           覆盖，逐卡贴徽标不区分任何东西，只是噪音（设计文档 §14.5） */}
-      <p className="text-sub leading-relaxed text-[var(--text-muted)]">
-        全站默认的刮削口味。
+      <p className="px-1 text-sub leading-relaxed text-[var(--text-muted)]">
+        全站默认的刮削口味，改动自动保存，对新刮削立即生效；已入库的条目在媒体库执行「刷新元数据」后按新配置更新。
         <strong className="font-medium text-[var(--text)]">任意一项</strong>
-        都可以在媒体库的「编辑库 → 刮削设置」里单独覆盖，没被覆盖的库跟随这里。
+        都可以在「编辑库 → 刮削设置」里单独覆盖，没被覆盖的库跟随这里。
       </p>
 
-      {/* 分节 + 手风琴卡片：与「编辑库 → 刮削设置」同一套结构与控件。
+      {/* 分节 + 行组：与「编辑库 → 刮削设置」同一套结构与控件。
           分节顺序沿用刮削管线的先后，只为读起来顺——四组之间没有依赖，
           所以不编号（编号会把并列分组伪装成必须按序完成的向导）。 */}
-      <ScrapeSection label="元数据">
+      <ScrapeSection label="元数据" description="标题、简介等文本的语言，以及内容分级取哪个地区">
         <MetaTab
           setting={setting}
           patch={patch}
@@ -1437,38 +2096,38 @@ export function ScrapeSettingsSection() {
         />
       </ScrapeSection>
 
-      <ScrapeSection label="图片">
+      <ScrapeSection label="图片" description="从哪些图库挑图、各类图按什么语言挑，以及本地存多大">
         <ImagesTab
           setting={setting}
           patch={patch}
           extraImageLangs={chipOptions.imageLangs}
           effective={view?.effective ?? null}
+          estimate={estimate}
           overriddenBy={overriddenBy}
           shellFor={shellFor}
         />
       </ScrapeSection>
 
-      <ScrapeSection label="命名与整理">
+      <ScrapeSection label="命名与整理" description="整理入库时的目录与文件命名">
         <NamingTab setting={setting} patch={patch} overriddenBy={overriddenBy} shellFor={shellFor} />
       </ScrapeSection>
 
-      <ScrapeSection label="目录写入">
-        <MirrorTab setting={setting} patch={patch} overriddenBy={overriddenBy} shellFor={shellFor} />
+      <ScrapeSection
+        label="目录写入"
+        description={
+          <>
+            把刮削成果写入媒体目录，反哺 Emby / Jellyfin / Kodi。只增不删，已存在的 NFO 绝不覆盖；每个媒体库还有一个总开关。
+            {mirrorOverrides.length > 0 && (
+              <span className="text-[var(--accent)]">
+                {" "}
+                {mirrorOverrides.join("、")}已单独覆盖。
+              </span>
+            )}
+          </>
+        }
+      >
+        <MirrorTab setting={setting} patch={patch} />
       </ScrapeSection>
-
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-caption text-[var(--text-faint)]">
-          保存后对新刮削立即生效；存量条目在媒体库页执行「刷新元数据」后按新配置更新。
-        </p>
-        <button
-          type="button"
-          disabled={!dirty || saving}
-          onClick={save}
-          className="btn-accent shrink-0 rounded-full px-5 py-2 text-ui font-semibold disabled:opacity-50"
-        >
-          {saving ? "保存中…" : "保存"}
-        </button>
-      </div>
     </div>
   );
 }

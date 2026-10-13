@@ -34,7 +34,7 @@ import {
   type MediaActivityTarget,
 } from "@/lib/api/playback";
 import { loadActivityScope, saveActivityScope } from "@/lib/activity-scope";
-import { deliveryColor, deliveryDetail, shortDeviceLabel } from "@/lib/activity-overview";
+import { deliveryColor, deliveryDetail, deviceLabel } from "@/lib/activity-overview";
 import { formatBytes } from "@/lib/format";
 import { imageUrl } from "@/lib/image-proxy";
 import { WATCH_VIEW_LABELS, type WatchViewName } from "@/lib/task-center";
@@ -154,11 +154,6 @@ function unitLabel(media: MediaActivityTarget): string | null {
   return `S${season}E${episode}`;
 }
 
-function deviceLabel(client: string, deviceName: string): string {
-  if (client && deviceName && client !== deviceName) return `${client} · ${deviceName}`;
-  return deviceName || client || "未知设备";
-}
-
 /** 元信息行：过滤空片段后用「·」连接，避免设备名或客户端缺失时留下悬空分隔符。 */
 function MetaLine({
   parts,
@@ -245,6 +240,8 @@ function ActivityPoster({
   const image = (
     <PosterImage
       src={media?.poster_url ? imageUrl(media.poster_url) : null}
+      // 海报位最大 64×96（w-16）
+      width={64}
       alt={media?.title ?? "未知内容"}
       className={`${className} rounded-lg object-cover ring-1 ring-white/10`}
     />
@@ -433,7 +430,7 @@ export function SessionCard({
             }
           />
         </div>
-        <MetaLine parts={[session.member_name, shortDeviceLabel(device)]} />
+        <MetaLine parts={[session.member_name, device]} />
         <div className="tnum flex min-w-0 items-center gap-1.5 whitespace-nowrap text-caption">
           {delivery && tone && (
             <span

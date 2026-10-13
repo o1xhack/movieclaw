@@ -506,6 +506,8 @@ _MEMBER_ALLOWLIST = {
     ("DELETE", "/api/v1/auth/devices/current"),
     ("PATCH", "/api/v1/auth/devices/{device_id}"),
     ("DELETE", "/api/v1/auth/devices/{device_id}"),
+    # 清理长期没用的设备：成员只清自己的，all=true（清全员）在路由里对非超管 403
+    ("POST", "/api/v1/auth/devices/cleanup"),
     ("GET", "/api/v1/auth/devices/requests/{user_code}"),
     ("POST", "/api/v1/auth/devices/requests/{user_code}/approve"),
     ("POST", "/api/v1/auth/devices/requests/{user_code}/deny"),
@@ -525,6 +527,7 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/share/{slug}/artwork"),
     ("GET", "/api/v1/share/{slug}/images/assets/{path}"),
     ("GET", "/api/v1/share/{slug}/images/proxy"),
+    ("GET", "/api/v1/share/{slug}/images/people/{path}"),
     ("GET", "/api/v1/share/{slug}/files/{file_id}/thumb"),
     ("POST", "/api/v1/share/{slug}/playback/decide"),
     ("POST", "/api/v1/share/{slug}/playback/sessions"),
@@ -550,10 +553,13 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/discover/region"),
     ("GET", "/api/v1/people/{tmdb_person_id}"),
     ("GET", "/api/v1/images/assets/{path}"),
+    # 演职员头像是公开资料（TMDB 头像），成员看详情页就要用到
+    ("GET", "/api/v1/images/people/{path}"),
     ("GET", "/api/v1/images/proxy"),
     # 媒体库：浏览面（管理动作全部在库路由级挂 require_admin）
     ("GET", "/api/v1/libraries"),
-    ("GET", "/api/v1/search/library-items"),
+    # 相关度搜索同属库内浏览，接口逐页检查库白名单与内容分级，不依赖 PT 搜索开关。
+    ("GET", "/api/v1/search/library"),
     ("GET", "/api/v1/libraries/files/{file_id}/thumb"),
     # 图片库的原图（灯箱全屏查看与下载）是成员的浏览面；路径由台账行推导、
     # 接口自身按文件所属库校验成员可见性，只服务图片扩展名的文件
@@ -577,9 +583,15 @@ _MEMBER_ALLOWLIST = {
     # 可见的库），内容分级同样经 _narrow 强制收窄，与单库墙同一套口径
     ("GET", "/api/v1/libraries/kinds/{kind}"),
     ("GET", "/api/v1/libraries/kinds/{kind}/items"),
+    ("GET", "/api/v1/libraries/kinds/{kind}/genres"),
+    # 首页海报行选中展开的批量展示信息：id 逐个按 visible_library_ids 与内容分级过滤，
+    # 看不见的条目静默略过（见 services/library/showcase.py）
+    ("GET", "/api/v1/libraries/showcase"),
     ("GET", "/api/v1/libraries/{library_id}/items/{media_item_id}"),
     ("GET", "/api/v1/libraries/{library_id}/items/{media_item_id}/artwork"),
     ("GET", "/api/v1/libraries/{library_id}/items/{media_item_id}/episodes"),
+    # 详情页相似推荐：候选按 visible_library_ids 与内容分级收窄（与跨库墙同一口径）
+    ("GET", "/api/v1/libraries/{library_id}/items/{media_item_id}/similar"),
     # 合集是成员的浏览面：列表按三层可见性收口（私有只对本人、库不可见就不下发、
     # 成员条目再过一遍），私有合集与不可见库里的合集一律按 404 拒绝而不是空列表。
     # 写操作（建/改/删）同样开放给成员——那是他自己的合集，household 的合集
@@ -587,6 +599,8 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/collections"),
     ("POST", "/api/v1/collections"),
     ("GET", "/api/v1/collections/{collection_id}"),
+    # 首页虚拟库封面属于成员浏览面，素材按合集归属、可见库与分级约束收窄。
+    ("GET", "/api/v1/collections/{collection_id}/cover"),
     ("PUT", "/api/v1/collections/{collection_id}"),
     ("DELETE", "/api/v1/collections/{collection_id}"),
     ("GET", "/api/v1/collections/{collection_id}/items"),
@@ -631,6 +645,8 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/playback/files/{file_id}/disc"),
     ("GET", "/api/v1/playback/files/{file_id}/disc/{relative_path}"),
     ("GET", "/api/v1/playback/files/{file_id}/subtitles"),
+    # 预切片段（reels.md §8）：同原文件直出，只凭签名 token（按文件签发）
+    ("GET", "/api/v1/reels/clips/{file_id}/{start_ms}.mp4"),
     ("GET", "/api/v1/playback/files/{file_id}/fonts"),
     ("GET", "/api/v1/playback/files/{file_id}/fonts/{name}"),
     ("GET", "/api/v1/playback/files/{file_id}/trickplay"),
@@ -656,6 +672,8 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/reels"),
     ("GET", "/api/v1/reels/facets"),
     ("POST", "/api/v1/reels/events"),
+    # 大图预告（Apple TV 首页 / 详情页）：条目可见性与分级照详情页校验，回忆按本人的续播点
+    ("GET", "/api/v1/reels/preview/{media_item_id}"),
     # 搜索历史：个人数据；统一结果端点再按记录类型检查对应能力。
     ("GET", "/api/v1/search/history"),
     ("GET", "/api/v1/search/history/{history_id}/results"),
@@ -663,6 +681,8 @@ _MEMBER_ALLOWLIST = {
     ("DELETE", "/api/v1/search/history"),
     # 订阅：读 + 写（写受 allow_subscribe，默认开）；运维接口是管理员专属
     ("GET", "/api/v1/subscriptions"),
+    # 全局智能偏好只读供成员订阅时复用；修改偏好仍限管理员。
+    ("GET", "/api/v1/subscriptions/smart-profiles/{kind}"),
     ("GET", "/api/v1/subscriptions/today-arrivals"),
     # 「刚刚入库」：订阅可见边界同上（自己发起 + 自己关注），文件只列可见库里在位的
     ("GET", "/api/v1/subscriptions/recent-arrivals"),
@@ -677,14 +697,44 @@ _MEMBER_ALLOWLIST = {
     ("GET", "/api/v1/subscriptions/{subscription_id}/active-downloads"),
     ("PATCH", "/api/v1/subscriptions/{subscription_id}/tracking-state"),
     ("PATCH", "/api/v1/subscriptions/{subscription_id}/follow-future"),
+    # 集数提示的忽略与自动续订同口径：订阅能力 + 归属校验（路由内 assert_can_manage）
+    ("POST", "/api/v1/subscriptions/{subscription_id}/episode-hints/dismiss"),
     ("POST", "/api/v1/subscriptions/{subscription_id}/missing-resource-searches"),
     # 一轮洗版与「立即搜索」同口径：订阅能力 + 归属校验（路由内 assert_can_manage）
     ("POST", "/api/v1/subscriptions/{subscription_id}/upgrade-runs"),
+    # 等待操作还会按订阅归属与订阅能力校验。
+    ("POST", "/api/v1/subscriptions/{subscription_id}/wanted/{wanted_id}/smart-wait"),
+    # App 推送（docs/design/cloud-push.md §7.3）：每个人只管自己的通知开关、设备状态、
+    # 测试通知；App 登记只认这台设备自己的凭证（服务层判定，网页会话登记不了）
+    ("GET", "/api/v1/app/features"),
+    ("GET", "/api/v1/push/me"),
+    ("PUT", "/api/v1/push/me/preferences"),
+    ("POST", "/api/v1/push/me/test"),
+    # 「这部剧不再提醒」：只静音自己的推送（按 owner_id 存），订阅照常下载
+    ("PUT", "/api/v1/push/me/muted-items/{item_id}"),
+    ("DELETE", "/api/v1/push/me/muted-items/{item_id}"),
+    ("PUT", "/api/v1/push/me/registration"),
+    ("DELETE", "/api/v1/push/me/registration"),
+    # 实时通知（cloud-push.md §4.1）：只读、只确认这台设备自己的发件箱（按设备凭证定位）
+    ("GET", "/api/v1/push/me/stream"),
+    ("POST", "/api/v1/push/me/ack"),
+    # 推送配图：公开区（地址自带签名），成员自然可达
+    ("GET", "/api/v1/push/images/{token}"),
+    # 使用提示（docs/design/tips.md）：只读写自己的事件计数与提示记录（按 owner_id 存）
+    ("GET", "/api/v1/tips/state"),
+    ("DELETE", "/api/v1/tips/state"),
+    ("POST", "/api/v1/tips/events/{event_id}"),
+    ("POST", "/api/v1/tips/{tip_id}/displays"),
+    ("POST", "/api/v1/tips/{tip_id}/invalidate"),
 }
 
 # 路径参数哑值（与 test_auth.py 的匿名守护测试保持一致）
 _PATH_DUMMIES = {
+    "{letter_id}": "1",  # 可靠事件死信
+    "{start_ms}": "0",  # 预切片段的起点
     "{task_key}": "library_reconcile",
+    "{event_id}": "x",
+    "{tip_id}": "x",
     "{site_id}": "mteam",
     "{history_id}": "1",
     "{backdrop_id}": "f" * 32,
@@ -703,11 +753,13 @@ _PATH_DUMMIES = {
     "{douban_id}": "26266893",
     "{collection_id}": "movie_top250",
     "{subscription_id}": "1",
+    "{wanted_id}": "1",
     "{rule_set_id}": "1",
     "{library_id}": "1",
     "{media_item_id}": "1",
     "{rule_id}": "1",
     "{entry_id}": "1",
+    "{key_id}": "1",
     "{file_id}": "1",
     "{device_id}": "no-such-device",
     "{user_code}": "MCLW-TEST",
@@ -724,6 +776,8 @@ _PATH_DUMMIES = {
     "{challenge_id}": "test-challenge",
     "{account_id}": "test-bot",
     "{channel}": "weixin",
+    "{channel_id}": "weixin",
+    "{binding_id}": "test-binding",
     "{endpoint_id}": "test-endpoint",
     "{member_id}": "1",
     "{job_id}": "job_test",
@@ -734,6 +788,10 @@ _PATH_DUMMIES = {
     "{key}": "cache.images",
     # 播放体验记录的播放编号
     "{attempt_id}": "test-attempt",
+    # App 推送的自建中继、推送配图的签名
+    "{relay_id}": "r_test",
+    "{token}": "no-such-image",
+    "{item_id}": "1",
 }
 
 

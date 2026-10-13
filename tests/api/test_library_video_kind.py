@@ -28,7 +28,7 @@ import movieclaw_api.services.media_scrape as scrape_mod
 from movieclaw_api.core.config import get_settings
 from movieclaw_api.exceptions import BadRequestException
 from movieclaw_api.schemas.library import LibraryView
-from movieclaw_api.services import jobs
+from movieclaw_api.services import acquisition_ingest, jobs
 from movieclaw_api.services.library import items as items_mod
 from movieclaw_api.services.library.config import LibraryConfigService, derive_save_path
 from movieclaw_api.services.library.organize import build_organize_plan
@@ -115,7 +115,7 @@ async def db(tmp_path, monkeypatch):
     monkeypatch.setattr(ingest_mod, "_failed_retry", {})
     monkeypatch.setattr(ingest_mod, "_last_swept", {})
     monkeypatch.setattr(ingest_mod, "QUIET_SECONDS", 0)
-    monkeypatch.setattr(ingest_mod, "_briefs_cache", (float("-inf"), None))
+    monkeypatch.setattr(acquisition_ingest, "_briefs_cache", (float("-inf"), None))
     yield get_database()
     await jobs.close_job_dispatcher()
     await dispose_db()
@@ -397,7 +397,10 @@ async def test_movie_library_unidentified_file_gets_provisional_item(
         assert [(v.title, v.source, v.tmdb_id) for v in wall] == [("zzqx", "local", None)]
         assert await items_mod.build_library_index(session, library.id) == []
         # 搜索也只搜正式条目
-        assert await items_mod.search_library_items(session, "zzqx") == {}
+        from movieclaw_api.services.library.search import search_candidates
+
+        candidates, _, _ = await search_candidates(session, "zzqx", {library.id}, 0, None)
+        assert candidates == []
         # 临时条目不算「已识别」，统计口径与待识别数一致
         fresh = await session.get(Library, library.id)
         assert fresh.stats_item_count == 0 and fresh.stats_unidentified_count == 1

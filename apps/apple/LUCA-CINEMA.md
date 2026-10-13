@@ -1,12 +1,12 @@
 # Luca Cinema 个人 TestFlight 构建
 
-基于 MovieClaw v0.30.0，iOS 版本 0.3.0，最低 iOS 26。
+基于 MovieClaw v0.37.0，iOS 版本 0.7.0（构建 3），最低 iOS 26。
 
 - 显示名称：Luca Cinema。
 - Bundle ID：com.o1xhack.lucacinema.app。
 - 客户端使用独立 LC 图标；服务器仍为 MovieClaw。
 - AetherEngine、FFmpeg 和服务端协议未改名、未修改。
-- 关于页附带 MovieClaw 完整许可证与修改声明，保留依赖版权和许可。
+- 关于页附带 MovieClaw 完整许可证与修改声明（Shared/Resources/Licenses），保留依赖版权和许可。
 - 当前仅作个人非商业内部 TestFlight 测试，未提交正式 App Store 审核。
 
 本机签名由忽略的 XcodeConfig/Signing.local.xcconfig 配置。所有新构建、导出和日志放在 /Volumes/StudioSSD/Developer/BuildScratch/MovieClaw 下。App Store Connect 凭据从全局 Apple secret helper 读取，不写入仓库。

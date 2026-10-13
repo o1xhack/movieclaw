@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import Field, field_serializer
+from pydantic import Field, field_serializer, field_validator
 
 from movieclaw_api.schemas.base import BaseModel
 from movieclaw_api.services.library.preflight import (
@@ -648,6 +648,25 @@ class LibraryKindSummaryView(BaseModel):
     item_count: int = Field(description="符合当前筛选的作品数（跨库去重）")
 
 
+class LibraryKindGenreView(BaseModel):
+    """首页「按类型找电影 / 剧集」的一格：一个 TMDB 类型、跨库部数，以及贴在卡片上的封面。
+
+    封面是这个类型**最近入库**、有剧照的那部片——色块同时是「这个类型新来了什么」
+    的提示。部数多的类型先挑，同一部片不会贴在两个类型上。
+    """
+
+    value: str = Field(description="TMDB genre id；点进去带 g=value 开墙")
+    label: str = Field(description="类型中文名")
+    count: int = Field(description="跨库去重后的部数")
+    cover_item_id: int | None = Field(
+        default=None, description="封面那部片的条目 id；没有可用剧照时为空"
+    )
+    cover_title: str | None = Field(default=None, description="封面那部片的片名")
+    cover_url: str | None = Field(
+        default=None, description="封面剧照（横版）；本地资产优先，回落 TMDB 图床"
+    )
+
+
 class LibraryGalleryImageView(BaseModel):
     """图廊里的一张图：条目的海报 / 剧照 / 分集剧照 / 章节场景图之一。
 
@@ -798,15 +817,6 @@ class LibraryItemView(BaseModel):
         return value.isoformat()
 
 
-class LibrarySearchGroupView(BaseModel):
-    """媒体库搜索结果的一组：一个库内命中关键词的条目（组内按标题拼音排序）。"""
-
-    library_id: int
-    library_name: str
-    kind: MediaKind
-    items: list[LibraryItemView]
-
-
 class AudioStreamView(BaseModel):
     """一条音轨（ffprobe 探测；字段 None=该项探不出）。"""
 
@@ -947,7 +957,7 @@ class LibraryFileView(BaseModel):
     )
     purge_after: datetime | None = Field(
         default=None,
-        description="待回收的预计自动清理时间；null 且 trashed = 做种保护，不自动删",
+        description="待回收的预计自动清理时间；null = 不自动删（2026-08-17 之前的旧数据）",
     )
     trash_note: str | None = Field(
         default=None,
@@ -1031,6 +1041,33 @@ class LocalMetaView(BaseModel):
     )
 
 
+class LibraryItemShowcaseView(BaseModel):
+    """海报行「选中展开」要的展示信息（电视首页，同 Netflix 电视版的焦点卡）。
+
+    海报墙列表（``LibraryItemView``）只带画格子要的字段；焦点停在某张海报上时，
+    它展开成横版剧照卡、下面写类型 / 时长 / 分级与两行简介——这些字段一行二十部
+    整批取一次，不逐张拉详情（详情带全部文件清单，一部剧上百集）。
+    """
+
+    media_item_id: int
+    backdrop_url: str | None = Field(
+        default=None,
+        description=(
+            "横版剧照：本地资产优先，回落 TMDB w1280"
+            "（展开卡约 800 点宽，4K 下 1600px，列表那张 w780 发虚）"
+        ),
+    )
+    logo_url: str | None = Field(
+        default=None, description="片名 Logo（透明底 PNG）；没有时前端写文字片名"
+    )
+    overview: str | None = Field(default=None, description="简介（前端最多显示两行）")
+    genres: list[str] = Field(default_factory=list, description="类型（前端取前两个）")
+    runtime_minutes: int | None = Field(
+        default=None, description="片长（电影用；剧集为单集时长，前端不显示）"
+    )
+    content_rating: str | None = Field(default=None, description="分级（优先 CN，无则 US）")
+
+
 class LibraryItemDetailView(BaseModel):
     """条目详情页的完整数据：基本信息 + 本地刮削元数据 + 逐文件真实规格。
 
@@ -1049,6 +1086,9 @@ class LibraryItemDetailView(BaseModel):
     douban_id: str | None
     title: str
     original_title: str
+    english_title: str | None = Field(
+        default=None, description="国际英文名；「搜索资源」与中文名、原名一起搜"
+    )
     year: int | None
     poster_url: str | None
     backdrop_url: str | None
@@ -1133,13 +1173,22 @@ class SeasonEpisodesView(BaseModel):
 
     season_number: int
     episodes: list[EpisodeView]
+    resume_episode: int | None = Field(
+        default=None,
+        description=(
+            "本季接着看的那一集（与首页「接下来继续」同规则：最近播放的一集，看完了取往后"
+            "第一个没看完且有片源的）；分集区按它锁定集段、默认选中。本季没播放过为 null"
+        ),
+    )
 
 
 class ArtworkCandidateView(BaseModel):
     """「更换图片」弹层里的一张候选（docs/design/metadata.md 6.3）。"""
 
-    file_path: str = Field(description="TMDB 图片路径（选定时原样回传）")
-    preview_url: str = Field(description="缩略预览地址（TMDB 图床，前端经代理加载）")
+    file_path: str = Field(
+        description="图片路径（选定时原样回传）：TMDB 为相对路径，Fanart.tv 为图床绝对地址"
+    )
+    preview_url: str = Field(description="缩略预览地址（图床小图，前端经代理加载）")
     width: int | None = None
     height: int | None = None
     language: str | None = Field(
@@ -1147,6 +1196,12 @@ class ArtworkCandidateView(BaseModel):
     )
     vote_average: float | None = None
     vote_count: int | None = None
+    source: Literal["tmdb", "fanart"] = Field(default="tmdb", description="图片来源")
+    likes: int | None = Field(default=None, description="Fanart.tv 的点赞数（仅 Fanart 图）")
+    unlisted: bool = Field(
+        default=False,
+        description="在用但不在本次候选里（旧策略选的 / 上游下架 / 来源没取到）：语言与热度未知",
+    )
 
 
 class ArtworkCandidatesView(BaseModel):
@@ -1170,6 +1225,11 @@ class ArtworkCandidatesView(BaseModel):
     poster_locked: bool = Field(default=False, description="海报已手动选定，刷新不覆盖")
     backdrop_locked: bool = Field(default=False, description="背景已手动选定，刷新不覆盖")
     logo_locked: bool = Field(default=False, description="徽标已手动选定，刷新不覆盖")
+    fanart: Literal["ok", "not_configured", "invalid", "error", "none"] = Field(
+        default="none",
+        description="Fanart.tv 候选的状态：ok=已混入候选 / not_configured=还没填 Key / "
+        "invalid=Key 已失效 / error=这次没取到 / none=不适用",
+    )
 
 
 class ArtworkSelectPayload(BaseModel):
@@ -1179,8 +1239,22 @@ class ArtworkSelectPayload(BaseModel):
         description="poster=海报 / backdrop=背景图 / logo=片名徽标"
     )
     file_path: str | None = Field(
-        default=None, min_length=1, description="TMDB 图片路径；null=解锁并恢复自动选图"
+        default=None,
+        min_length=1,
+        description="候选里的 file_path（TMDB 相对路径或 Fanart.tv 图床地址）；"
+        "null=解锁并恢复自动选图",
     )
+
+    @field_validator("file_path")
+    @classmethod
+    def _check_file_path(cls, value: str | None) -> str | None:
+        """只收 TMDB 相对路径或 Fanart 图床地址：选定后服务端会去拉这张图，
+        不能让任意 URL 经这里变成服务端代发的请求。"""
+        from movieclaw_media.fanart import is_fanart_asset
+
+        if value is None or value.startswith("/") or is_fanart_asset(value):
+            return value
+        raise ValueError("图片路径不合法：只接受 TMDB 图片路径或 Fanart.tv 图床地址")
 
 
 class ReidentifyResultView(BaseModel):
@@ -1422,13 +1496,58 @@ class TransferStatusView(BaseModel):
         return value.isoformat()
 
 
+class DeleteFollowUpView(BaseModel):
+    """一个勾选的删除选项建出的后续任务（docs/design/library-boundary.md §3.4）。"""
+
+    option: str = Field(description="删除选项的键，如 downloads:remove-source")
+    label: str
+    job_id: str
+
+
 class ItemDeleteResultView(BaseModel):
     """条目真实删除的结论。"""
 
-    removed_paths: list[str] = Field(description="实际从磁盘删除的目录/文件")
+    removed_paths: list[str] = Field(description="实际从磁盘删除的目录/文件（演练时为将要删除的）")
     rows_deleted: int
     freed_bytes: int
     errors: list[str] = Field(default_factory=list)
+    dry_run: bool = Field(default=False, description="是否只是演练（什么都没删）")
+    # 标成可空：客户端按「可能没有」生成，新版 App 连旧服务端（返回里没有这个字段）照常解码
+    follow_ups: list[DeleteFollowUpView] | None = Field(
+        default_factory=list,
+        description="勾选的删除选项各建了一个后续任务，删除提交后执行；按 job_id 跟进结果",
+    )
+
+
+class DeletePreviewLineView(BaseModel):
+    text: str
+    tone: Literal["info", "warn", "danger"] = "info"
+
+
+class DeleteOptionView(BaseModel):
+    """删除弹窗里的一个附加选项（别的模块登记的删除参与方）；默认一律不勾。"""
+
+    key: str = Field(description="勾选时传给删除接口 options 的键")
+    label: str
+    help: str = Field(description="后果说明")
+    available: bool = Field(description="这次能不能勾")
+    reason: str | None = Field(default=None, description="不能勾的原因")
+    lines: list[DeletePreviewLineView] = Field(
+        default_factory=list, description="勾上会发生什么（按这次要删的文件算）"
+    )
+
+
+class ItemDeletePreviewView(BaseModel):
+    """删除前的完整预览：媒体库自己的计划 + 各删除选项。"""
+
+    whole_item: bool = Field(description="是否整部删除（删单文件但它是最后一个文件时也是）")
+    plan: ItemDeleteResultView = Field(description="媒体库将删除的路径与台账行（演练）")
+    linked_bytes: int = Field(
+        description=(
+            "要删的文件里与别处是同一份数据（硬链接）的字节数：只删库文件不会释放这部分空间"
+        )
+    )
+    options: list[DeleteOptionView] = Field(default_factory=list)
 
 
 class UnidentifiedCandidateView(BaseModel):
@@ -1728,6 +1847,19 @@ class RestorePayload(BaseModel):
     """恢复已忽略的文件：清掉忽略标记，重新参与识别。"""
 
     file_ids: list[int] = Field(min_length=1, description="要恢复识别的已忽略文件 id 数组")
+
+
+class ScanStartPayload(BaseModel):
+    """扫描范围（可选）。"""
+
+    paths: list[str] | None = Field(
+        default=None,
+        description=(
+            "只扫这些路径所在的条目目录（库根下第一级）；不传则整库扫描。"
+            "适合外部工具或插件刚往库里放了内容、只想让这一处入账"
+        ),
+        max_length=200,
+    )
 
 
 class ScanResultView(BaseModel):

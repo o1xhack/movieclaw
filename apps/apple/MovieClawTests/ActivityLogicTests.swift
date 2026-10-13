@@ -16,10 +16,10 @@ struct ActivityLogicTests {
     private func job(
         id: String = "j1", type: String = "library.scan", status: String = "succeeded", dismissed: Bool = false,
         message: String = "", subject: String? = nil, resources: [[String: String]] = [], details: [String: Any] = [:],
-        cancelledBy: String? = nil, updated: String = "2026-09-25T10:00:00+00:00"
+        cancelledBy: String? = nil, updated: String = "2026-09-25T10:00:00+00:00", typeLabel: String? = nil
     ) -> API.JobView {
         decode([
-            "id": id, "job_type": type, "subject": nn(subject), "definition_version": 1, "handler_revision": "x",
+            "id": id, "job_type": type, "job_type_label": nn(typeLabel), "subject": nn(subject), "definition_version": 1, "handler_revision": "x",
             "status": status, "input_data": [:], "result": NSNull(), "error": NSNull(), "usage": [:],
             "progress": ["mode": "determinate", "phase": "completed", "message": message, "details": details],
             "resources": resources.map { ["resource_type": $0["type"]!, "resource_id": $0["id"]!, "relation": "target"] },
@@ -45,6 +45,17 @@ struct ActivityLogicTests {
             "media_item_id": nn(mediaItemId), "media_title": "深渊无间", "media_kind": "tv",
             "plan": nn(plan), "subscriptions": subscriptions, "can_replace": canReplace,
         ])
+    }
+
+    @Test func jobTypeLabelPrefersLocalThenServerName() {
+        // 内置类型：本地文案（服务端没给名字的老版本也一样）
+        #expect(TaskCenter.jobTypeLabel(job(type: "library.scan")) == "扫描媒体库")
+        // 插件任务：服务端给的名字；历史标题也用它
+        let plugin = job(type: "strm-prefetch:backfill", status: "succeeded", typeLabel: "网盘规格预探")
+        #expect(TaskCenter.jobTypeLabel(plugin) == "网盘规格预探")
+        #expect(TaskCenter.historicalJobTitle(plugin) == "网盘规格预探完成")
+        // 都没有：原始类型
+        #expect(TaskCenter.jobTypeLabel(job(type: "acme:sync", typeLabel: "")) == "acme:sync")
     }
 
     @Test func attentionAndDismissed() {
@@ -120,5 +131,37 @@ struct ActivityLogicTests {
         #expect(NoticeCenterView.visible([child]).map(\.id) == [2])
         #expect(NoticeCenterView.href(parent) == "/subscriptions/9")
         #expect(NoticeCenterView.href(child) == "/settings/import-watch")
+        // 和 MovieClaw Cloud 断开、连不上：跳 Cloud 设置页（与网页、手机推送同一套映射）
+        let cloud: API.NoticeView = decode([
+            "id": 3, "severity": "warning", "source": "cloud", "title": "t", "message": "m",
+            "payload": [:], "created_at": "", "updated_at": "",
+        ])
+        #expect(NoticeCenterView.href(cloud) == "/settings/cloud")
+        // 插件：带站内路径就去那里（插件包回滚 → 插件管理页），否则去内置插件诊断；外站地址不认
+        let rolledBack: API.NoticeView = decode([
+            "id": 4, "severity": "warning", "source": "plugin", "title": "t", "message": "m",
+            "payload": ["action_href": "/settings/plugins"], "created_at": "", "updated_at": "",
+        ])
+        #expect(NoticeCenterView.href(rolledBack) == "/settings/plugins")
+        let failed: API.NoticeView = decode([
+            "id": 5, "severity": "warning", "source": "plugin", "title": "t", "message": "m",
+            "payload": ["action_href": "//evil.example"], "created_at": "", "updated_at": "",
+        ])
+        #expect(NoticeCenterView.href(failed) == "/settings/plugins?tab=builtin")
+    }
+
+    /// 播放设备名：去「MovieClaw 」品牌前缀、设备名以客户端名打头时不重复（口径同 Web `deviceLabel`）
+    @Test func deviceLabel() {
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw Web", deviceName: "Safari · iPhone") == "Web · Safari · iPhone")
+        #expect(WatchFormat.deviceLabel(client: "Infuse", deviceName: "Apple TV") == "Infuse · Apple TV")
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw Apple TV", deviceName: "Apple TV · tvOS 27.0") == "Apple TV · tvOS 27.0")
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw Android", deviceName: "Android 16") == "Android 16")
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw iOS", deviceName: "iPhone · iOS 27.0") == "iPhone · iOS 27.0")
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw Android", deviceName: "Pixel 9 · Android 16") == "Pixel 9 · Android 16")
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw Android TV", deviceName: "BRAVIA 4K VH2 · Android 12")
+            == "Android TV · BRAVIA 4K VH2 · Android 12")
+        #expect(WatchFormat.deviceLabel(client: "MovieClaw Android", deviceName: "AndroidTV") == "Android · AndroidTV")
+        #expect(WatchFormat.deviceLabel(client: "", deviceName: "") == "未知设备")
+        #expect(WatchFormat.deviceLabel(client: "Infuse", deviceName: "") == "Infuse")
     }
 }

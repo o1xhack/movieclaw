@@ -4,7 +4,7 @@
 
 <p align="center">
   一个 MovieClaw，替代一整套影音工具。<br>
-  自带网页与 iPhone 原生 App，内置能自己动手的 AI 助手。<br>
+  自带网页和手机、电视、Mac 上的原生 App，内置能自己动手的 AI 助手。<br>
   数据全在你自己的机器上，个人和家庭使用免费。
 </p>
 
@@ -15,9 +15,11 @@
 <p align="center">
   <a href="#5-分钟跑起来">快速开始</a> ·
   <a href="https://demo.movieclaw.io">在线体验</a> ·
+  <a href="https://movieclaw.io/zh/download">下载</a> ·
   <a href="#说一句它全都搞定">AI 助手</a> ·
   <a href="#boundaries">边界</a> ·
   <a href="#在别的机器上操控它">命令行</a> ·
+  <a href="https://movieclaw.io/zh/docs">文档</a> ·
   <a href="docs/design/">设计文档</a> ·
   <a href="#交流群">交流群</a> ·
   <a href="https://github.com/movieclaw/movieclaw/issues">反馈</a>
@@ -33,7 +35,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/home.jpg" width="900" alt="MovieClaw 的媒体库：接下来继续看的影片、收藏，以及各个媒体库">
+  <img src="docs/images/subscriptions.jpg" width="900" alt="MovieClaw 网页版的「我的订阅」：轮播里是刚入库的影片，下面是「刚刚入库」一栏">
 </p>
 
 <p align="center">
@@ -60,7 +62,7 @@
 
 ## 自带原生 App，播放不输 Infuse
 
-网页打开就能看，iPhone 上是原生 App。自研播放引擎：FFmpeg 负责拆，Apple 负责播。
+网页打开就能看，手机、电视和 Mac 上都有原生 App。iPhone、Apple TV 和 Mac 用同一套自研播放引擎：FFmpeg 负责拆，Apple 负责播。
 
 <p align="center">
   <img src="docs/images/player.jpg" width="900" alt="iPhone 横屏播放：液态玻璃的播放控制、音轨与字幕、AirPlay 和实时网速">
@@ -74,10 +76,14 @@
 - 进度在网页、App 和 Infuse 之间同步，在哪看都接得上。
 - 「片段」：在片库里竖着滑，从自己的电影和剧集里刷精彩片段。
 
-**怎么装 App**：从 [Releases](https://github.com/movieclaw/movieclaw/releases) 下载 `MovieClaw-iOS-unsigned.ipa`，用 AltStore、SideStore 或 Sideloadly 以自己的 Apple ID 安装，需要 iOS 26 及以上；TestFlight 公开测试稍后开放。资源站点和下载器在网页端配置。
+**怎么装 App**：iPhone、Android、Apple TV、Android TV 和 Mac 的 App 都汇总在[官网下载页](https://movieclaw.io/zh/download)，各平台的版本、系统要求和安装方法都在那里。iPhone 版正在上架 App Store，现在可以从 [Releases](https://github.com/movieclaw/movieclaw/releases) 下载 `MovieClaw-iOS-unsigned.ipa`，用 AltStore、SideStore 或 Sideloadly 以自己的 Apple ID 安装，需要 iOS 26 及以上（侧载版收不到推送通知）。资源站点和下载器在网页端配置。
+
+想在新 App 上架、发布新版本时收到邮件？在官网[订阅动态](https://movieclaw.io/zh/download#updates)，登录后选好收信邮箱就行，随时可以退订。
 
 网页端是液态玻璃：侧栏、输入框、悬浮按钮会折射你设的背景图，边缘带一点色差。背景图在「设置 → 外观」里换，跨设备访问同一实例保持一致。
 
+
+Windows 客户端源码位于 [`apps/desktop`](apps/desktop/README.md)，使用 Tauri/WebView2 和内置 mpv。开发、打包及验证范围见该目录说明。
 
 ## 说一句，它全都搞定
 
@@ -90,7 +96,7 @@ MovieClaw 把一个自主的通用 Agent 装进了影音服务器。打理片库
 
 在微信里说一句也行，还能发语音；Telegram、Discord 也能对话，飞书群可以接成只推送的通知出口。删除这类操作，它会先问你；每一步调用了什么工具都摊开给你看，规则写在[权限边界](#boundaries)里。
 
-助手需要接入一个大模型（「设置 → AI 模型」，OpenAI 兼容端点都行），不接不影响其他功能。还可以用纯 Markdown 给它加「技能」：在 `data/agent-skills/` 下放一个目录 + `SKILL.md`（frontmatter 写 `description`，正文写指令，可带脚本），网页会话里任务匹配时助手会自己加载执行，改完即生效不用重启。与产品内置技能同名时你的版本优先（日志会提示），细节见 [`docs/design/agent-skills.md`](docs/design/agent-skills.md)。
+助手需要接入一个大模型（「设置 → 模型接入」，OpenAI 兼容端点都行），不接不影响其他功能。还可以用纯 Markdown 给它加「技能」：在 `data/agent-skills/` 下放一个目录 + `SKILL.md`（frontmatter 写 `description`，正文写指令，可带脚本），网页会话里任务匹配时助手会自己加载执行，改完即生效不用重启。与产品内置技能同名时你的版本优先（日志会提示），细节见 [`docs/design/agent-skills.md`](docs/design/agent-skills.md)。
 
 ### 识别，又快又准
 
@@ -131,7 +137,7 @@ MovieClaw 把一个自主的通用 Agent 装进了影音服务器。打理片库
   <tr>
     <td width="50%" valign="top">
       <img src="docs/images/scene-1.jpg" alt="网页上的「接下来继续」，iPhone 上同一部片子显示「继续 10:44」">
-      <p><b>08:30 地铁上</b>：昨晚没看完的，手机上接着看。网页、iPhone 原生 App，还有 Infuse 这类播放器，在哪看都行，进度跟着你走。</p>
+      <p><b>08:30 地铁上</b>：昨晚没看完的，手机上接着看。网页、原生 App，还有 Infuse 这类播放器，在哪看都行，进度跟着你走。</p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/scene-2.jpg" alt="iPhone 上的订阅页：刚刚入库的 Coffee Run">
@@ -284,7 +290,7 @@ docker compose up -d
    看到这句就是路径填错了。
 2. **接下载器**："设置 → 下载器"接入 qBittorrent / Transmission；下载器与 MovieClaw 看到的路径不一致时，在这里配好路径映射。
 3. **接站点**："设置 → 资源站点"填 Cookie / API Key，或装浏览器扩展自动同步。
-4. 可选："设置 → AI 模型"接入大模型解锁 AI 助手；"设置 → 监听导入"加一条"源目录 → 目标库"规则，让任意来源的下载也自动入库。
+4. 可选："设置 → 模型接入"接入大模型、"设置 → AI 设定"选默认模型，解锁 AI 助手；"设置 → 自动入库"加一条"源目录 → 目标库"规则，让任意来源的下载也自动入库。
 
 > 只想试一条命令？
 > `docker run -d --name movieclaw --init -p 3000:3000 --restart unless-stopped -e TZ=Asia/Shanghai -v "$(pwd)/data:/app/data" -v /volume1/media:/media -v /volume1/downloads:/downloads movieclaw/movieclaw:latest`
@@ -292,7 +298,7 @@ docker compose up -d
 
 ### 日常升级：不用重拉镜像
 
-装完之后的日常升级在"设置 → 应用 → 版本与更新"里直接完成：下载的是 GitHub Release 上
+装完之后的日常升级在"设置 → 更新与维护"里直接完成：下载的是 GitHub Release 上
 几 MB 的产物包（可配加速镜像），更新落在 `data` 卷上，容器重建也不丢。更新出问题可在同一页面
 直接回退，坏更新还会被容器自动回落到可用版本。
 
@@ -348,7 +354,7 @@ irm https://raw.githubusercontent.com/movieclaw/movieclaw/main/scripts/install-c
 
 装完跑 `mclaw login` 配对：不带参数会先在局域网里找一遍，跨网段或走 VPN 就自己给地址
 （`mclaw login --server http://192.168.1.10:3000`）。命令会显示一段配对码，到网页
-「设置 → 成员与设备 → 设备」核对后批准就行。令牌直接回到这个进程，不上屏，
+「设置 → 设备」核对后批准就行。令牌直接回到这个进程，不上屏，
 也就不会进剪贴板和 shell 历史。
 
 没人能去浏览器点批准的环境（NAS 的定时任务、CI、无界面容器），在同一个设备页
@@ -407,11 +413,13 @@ python -m movieclaw_api.reset_password
 容器内端口不用动。
 
 只有用 `--network host` 时容器内端口就是宿主端口，这时才需要真正换监听端口：
-加 `-e MOVIECLAW_WEB_PORT=8096`，或装好后在"设置 → 应用 → 网络与维护"里改（保存后自动重启生效）。
+加 `-e MOVIECLAW_WEB_PORT=8096`，或装好后在"设置 → 网络"里改（保存后自动重启生效）。
 
 **但 host 网络还有个坑**：容器内部的前端（3001）和后端（8000）也会直接占用宿主的这两个端口，
-它们目前不可改，`MOVIECLAW_WEB_PORT` 管不到。任一个被别的服务占了，容器会启动失败并退出，
-`docker logs` 里是一行英文 `EADDRINUSE: address already in use`。另外 host 网络下还会监听
+`MOVIECLAW_WEB_PORT` 只改 nginx 对外端口。若 3001 被占用，加 `MOVIECLAW_NEXT_PORT=13001`
+（或其他空闲端口）改内部前端端口；后端仍固定为 8000，须确保它空闲。host 网络下应删除
+`ports`，因为端口映射无效。此选项需要拉取更新后的 Docker 镜像并重建容器，应用内更新无法
+替换启动脚本和 nginx 模板。另外 host 网络下还会监听
 UDP 7359（Jellyfin 局域网自动发现），和已有的 Jellyfin / Emby 会撞。
 
 **所以：除非你确实需要局域网自动发现，否则用上面改冒号左边的办法，别上 host 网络。**
@@ -420,10 +428,10 @@ UDP 7359（Jellyfin 局域网自动发现），和已有的 Jellyfin / Emby 会�
 <details>
 <summary><b>刮削一直失败，日志说连不上 TMDB</b></summary>
 
-日志或"设置 → 网络与代理"的连通性测试里出现 `无法连通 TMDB`、`ConnectTimeout`、
+日志或"设置 → 网络"的连通性测试里出现 `无法连通 TMDB`、`ConnectTimeout`、
 `CircuitOpenError`、`CERTIFICATE_VERIFY_FAILED` 这类字样，都属于这一类。
 
-所在网络直连不到 `api.themoviedb.org` 时，到"设置 → 网络与代理"配置代理或镜像地址，
+所在网络直连不到 `api.themoviedb.org` 时，到"设置 → 网络"配置代理或镜像地址，
 并用页面上的连通性测试验证。默认走代理的服务是 TMDB、图片回源和 GitHub 更新，
 PT 站点保持直连（通常直连更快）。
 </details>
@@ -529,27 +537,14 @@ Web 控制台 `http://127.0.0.1:3000`，API 文档 `http://127.0.0.1:8000/docs`�
 
 部署遇到问题、想提需求、或者只是想晒一下自己的片库，都欢迎进群聊：
 
-<table>
-  <tr>
-    <td align="center" width="50%" valign="top">
-      <img src="docs/images/wechat-group.jpg" width="240" alt="微信交流群二维码">
-      <br>
-      <b>微信群</b><br>
-      用微信扫码进群。
-    </td>
-    <td align="center" width="50%" valign="top">
-      <a href="https://t.me/movieclawio"><img src="https://img.shields.io/badge/Telegram-%40movieclawio-26A5E4?logo=telegram&logoColor=white&style=for-the-badge" alt="Telegram 群"></a>
-      <br><br>
-      <b>Telegram</b><br>
-      <a href="https://t.me/movieclawio">t.me/movieclawio</a>
-      <br><br>
-      公开群，直接点链接进。
-    </td>
-  </tr>
-</table>
-
-微信群二维码 7 天失效。如果上面的码已经扫不进去了，可以先进 Telegram 群，
-或者开个 [Issue](https://github.com/movieclaw/movieclaw/issues) 提醒我们换新码。
+<p align="center">
+  <a href="https://t.me/movieclawio"><img src="https://img.shields.io/badge/Telegram-%40movieclawio-26A5E4?logo=telegram&logoColor=white&style=for-the-badge" alt="Telegram 群"></a>
+  <br><br>
+  <b>Telegram</b><br>
+  <a href="https://t.me/movieclawio">t.me/movieclawio</a>
+  <br><br>
+  公开群，直接点链接进。
+</p>
 
 ## 文档与支持
 

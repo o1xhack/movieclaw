@@ -16,14 +16,13 @@ from urllib.parse import quote
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi import Path as PathParam
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import ClientDisconnect
 from starlette.websockets import WebSocketDisconnect
 
 from movieclaw_api.api.client_address import client_address
 from movieclaw_api.api.deps import require_admin, resolve_worker_principal
-from movieclaw_api.core.config import get_settings
 from movieclaw_api.exceptions import (
     InsufficientStorageException,
     NotFoundException,
@@ -34,20 +33,23 @@ from movieclaw_api.schemas.response import ApiResponse, ok
 from movieclaw_api.schemas.transcode_worker import (
     RemoteTranscodeConfigPayload,
     RemoteTranscodeConfigView,
+    WorkerConfigPayload,
 )
 from movieclaw_api.services import login_devices, media_scrape
-from movieclaw_api.services.image_cache import get_image_cache
 from movieclaw_api.services.image_variants import (
     ImageVariant,
     get_image_variant_service,
     source_version_of,
 )
+from movieclaw_api.services.network_egress import effective_tmdb_image_base_url
 from movieclaw_api.services.playback import remote_config as remote_transcode_config
-from movieclaw_api.services.playback.disc_source import disc_source_for_file
 from movieclaw_api.services.playback.ffmpeg_args import (
     REMOTE_IO_TIMEOUT_US,
     REMOTE_RECONNECT_OPTIONS,
     remote_read_options,
+)
+from movieclaw_api.services.playback.iso_source import (
+    transcode_disc_source as resolve_transcode_disc,
 )
 from movieclaw_api.services.playback.remote_signing import verify_remote_grant
 from movieclaw_api.services.playback.remote_worker import (
@@ -61,14 +63,26 @@ from movieclaw_api.services.playback.session import (
     TranscodeSession,
     get_session_manager,
 )
-from movieclaw_db.engine import get_session
+from movieclaw_api.services.playback.worker_config import (
+    ensure_worker_limit,
+    save_worker_limit,
+    worker_limits,
+)
+from movieclaw_api.services.tmdb_images import remote_image_url
+from movieclaw_db.engine import get_database, get_session
 from movieclaw_db.models import LibraryFile, MediaItem
 from movieclaw_db.repositories.media_repo import MediaItemRepository
 from movieclaw_events import new_ulid
 from movieclaw_playback.streaming import (
     DisconnectAwareFileResponse,
+    FileWindowResponse,
+    RemoteRelayResponse,
+    StrmError,
+    StrmLink,
     container_mime_type,
     is_strm,
+    parse_strm,
+    strm_redirect_target,
 )
 
 logger = logging.getLogger("movieclaw_api.playback.transcode_worker")
@@ -308,12 +322,18 @@ async def transcode_worker_websocket(websocket: WebSocket) -> None:
             await websocket.close(code=1008, reason=reason)
             return
         try:
+            device_id = principal.device.id if principal.device is not None else None
+            max_jobs = None
+            if device_id is not None:
+                initial = registry._parse_capabilities(hello.get("capabilities")).max_jobs
+                max_jobs = await ensure_worker_limit(device_id, initial)
             connection = await registry.register(
                 websocket,
                 hello,
                 observed_base_url=_observed_base_url(websocket),
                 # 注销这台转码器时据此当场断开连接（login_devices._after_revoke）
                 login_device_id=principal.device.id if principal.device is not None else None,
+                max_jobs=max_jobs,
             )
         except ValueError as exc:
             _warn_throttled(
@@ -321,10 +341,18 @@ async def transcode_worker_websocket(websocket: WebSocket) -> None:
             )
             await websocket.close(code=1008, reason=str(exc))
             return
+        if principal.device is not None and principal.device.kind == "worker":
+            # Mac 设置里的名称随 hello 更新；只同步已认证转码器自己的记录，
+            # 不改手工令牌名称，也不赋予 Worker 修改其他设备的权限。
+            async with get_database().session() as session:
+                device = await login_devices.get_device(session, principal.device.id)
+                if device is not None and device.name != connection.worker_id:
+                    await login_devices.rename(session, device, connection.worker_id)
         await connection.send(
             {
                 "type": "worker.accepted",
                 "protocol_version": REMOTE_WORKER_PROTOCOL_VERSION,
+                "max_jobs": connection.max_jobs,
             }
         )
         worker_ip = client_address(websocket) or None  # type: ignore[arg-type]
@@ -337,6 +365,19 @@ async def transcode_worker_websocket(websocket: WebSocket) -> None:
                     connection.login_device_id, ip=worker_ip, user_agent=worker_ua
                 )
             if isinstance(message, dict):
+                if message.get("type") == "worker.configure":
+                    if connection.login_device_id is not None:
+                        try:
+                            payload = WorkerConfigPayload.model_validate(
+                                {"max_jobs": message.get("max_jobs")}
+                            )
+                        except ValueError:
+                            await connection.send(
+                                {"type": "worker.config.error", "error": "并发上限必须为 1～4"}
+                            )
+                        else:
+                            await save_worker_limit(connection.login_device_id, payload.max_jobs)
+                    continue
                 forwarded = await registry.handle_message(connection, message)
                 if forwarded is None:
                     pass
@@ -381,8 +422,28 @@ async def transcode_worker_status() -> ApiResponse[dict]:
             "base_url_configured": bool(config.base_url),
             "ready": config.ready,
             "workers": get_remote_worker_registry().snapshot(),
+            "device_limits": {f"ld-{k}": v for k, v in (await worker_limits()).items()},
         }
     )
+
+
+@router.put(
+    "/devices/{device_id}/config",
+    response_model=ApiResponse[WorkerConfigPayload],
+    summary="修改转码器并发上限",
+    operation_id="transcode.worker.config",
+    dependencies=[Depends(require_admin)],
+)
+async def configure_transcode_worker(
+    device_id: int,
+    payload: WorkerConfigPayload,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[WorkerConfigPayload]:
+    device = await login_devices.get_device(session, device_id)
+    if device is None or device.scope != "transcode":
+        raise NotFoundException("转码器不存在")
+    await save_worker_limit(device_id, payload.max_jobs)
+    return ok(payload)
 
 
 async def _remote_source_file(
@@ -398,7 +459,7 @@ async def _remote_source_file(
     ):
         raise NotFoundException("远程转码会话不存在")
     file = await session.get(LibraryFile, grant.file_id)
-    if file is None or is_strm(file.file_path):
+    if file is None:
         raise NotFoundException("远程转码源文件不存在")
     return file
 
@@ -488,12 +549,34 @@ async def transcode_source(
     token: Annotated[str | None, Query()] = None,
     session: AsyncSession = Depends(get_session),
 ):
-    """给 Worker 提供支持 Range 的源文件读取；不允许读取 strm 占位文件。"""
+    """给 Worker 提供支持 Range 的源文件读取。
+
+    网盘（strm）条目跳转到网盘直链：Worker 直接从网盘取源，不经 NAS 中转。Worker 的
+    取源代理与 ffmpeg 都跟随跳转，跳转后照常按 Range 取；每次取数都经这里现读 strm，
+    直链过期了也能拿到新的。strm 指向 NAS 挂载目录里的文件时与本地文件同样出字节。
+    """
     file = await _remote_source_file(session_id, token, session)
-    if file.is_disc():
+    path = Path(file.file_path)
+    if is_strm(file.file_path):
+        try:
+            source = parse_strm(file.file_path)
+        except StrmError as exc:
+            raise NotFoundException(f"strm 用不了：{exc}") from exc
+        if isinstance(source, StrmLink):
+            target = await strm_redirect_target(source, request.headers.get("user-agent"))
+            if target is None:
+                # 回环 / 容器服务名的直链 Worker 连不上（它在另一台机器上），要带请求头的直链
+                # Worker 也不知道该带什么：NAS 原样转发
+                return RemoteRelayResponse(
+                    source.url,
+                    range_header=request.headers.get("range"),
+                    upstream_headers=source.headers,
+                )
+            return RedirectResponse(target, status_code=302)
+        path = source
+    elif file.is_disc():
         # 原盘是目录，没有单一源文件；新版 Worker 读 source.ffconcat，走不到这里
         raise NotFoundException("原盘没有单一源文件，请改读 source.ffconcat 清单")
-    path = Path(file.file_path)
     if not path.is_file():
         raise _missing_source(session_id, file, path)
     return DisconnectAwareFileResponse(
@@ -523,7 +606,7 @@ async def transcode_disc_source(
     每段逐个带上断线续读参数——命令行上的 ``-reconnect`` 只管清单这一个输入。
     """
     file = await _remote_source_file(session_id, token, session)
-    disc = disc_source_for_file(file) if file.is_disc() else None
+    disc = await asyncio.to_thread(resolve_transcode_disc, file) if file.is_disc() else None
     if disc is None:
         raise NotFoundException("这个远程转码会话的源不是可读的原盘")
     token_query = quote(token or "", safe="")
@@ -564,12 +647,22 @@ async def transcode_disc_clip(
 ):
     """原盘清单里第 ``index`` 段剪辑（m2ts）的 Range 读取。"""
     file = await _remote_source_file(session_id, token, session)
-    disc = disc_source_for_file(file) if file.is_disc() else None
+    disc = await asyncio.to_thread(resolve_transcode_disc, file) if file.is_disc() else None
     if disc is None or index >= len(disc.clips):
         raise NotFoundException("原盘剪辑不存在")
-    path = disc.clips[index].path
+    clip = disc.clips[index]
+    path = clip.path
     if not path.is_file():
         raise _missing_source(session_id, file, path)
+    if clip.byte_ranges is not None:
+        # 光盘镜像里的剪辑：镜像上的几截字节拼成一个独立文件供出（iso_source.py）
+        return FileWindowResponse(
+            path,
+            windows=clip.byte_ranges,
+            media_type="video/MP2T" if disc.image == "bluray" else "video/MP2P",
+            headers={"Cache-Control": "no-store"},
+            probe=_source_read_marks(session_id, request, clip=index),
+        )
     return DisconnectAwareFileResponse(
         path,
         media_type="video/MP2T",
@@ -605,16 +698,21 @@ async def transcode_poster(
     poster_file = meta.poster_file if meta is not None else None
     target = media_scrape.resolve_asset_path(poster_file) if poster_file else None
     if target is not None and target.is_file():
-        source, key, version = target, f"asset:{poster_file}", source_version_of(target.stat())
+        variant = await get_image_variant_service().get_or_create(
+            target,
+            source_key=f"asset:{poster_file}",
+            source_version=source_version_of(target.stat()),
+            variant=ImageVariant.POSTER_CARD,
+        )
     elif item.poster_path:
-        url = f"{get_settings().tmdb_image_base_url.rstrip('/')}/w500{item.poster_path}"
-        cached = await get_image_cache().get_or_fetch(url)
-        source, key, version = cached.path, f"remote:{url}", cached.version
+        url = remote_image_url(
+            effective_tmdb_image_base_url().rstrip("/"), "w500", item.poster_path
+        )
+        variant = await get_image_variant_service().get_or_create_remote(
+            url, variant=ImageVariant.POSTER_CARD
+        )
     else:
         raise NotFoundException("这部片还没有海报")
-    variant = await get_image_variant_service().get_or_create(
-        source, source_key=key, source_version=version, variant=ImageVariant.POSTER_CARD
-    )
     return FileResponse(
         variant.path, media_type=variant.content_type, headers={"Cache-Control": "no-store"}
     )

@@ -6,11 +6,11 @@ import { createPortal } from "react-dom";
 
 import {
   ActivityIcon,
-  BookmarkIcon,
+  BookmarkFillIcon,
   ChatIcon,
   ClockIcon,
   CopyIcon,
-  LibraryIcon,
+  LibraryStackIcon,
   MoreIcon,
   PanelLeftIcon,
   PencilIcon,
@@ -61,7 +61,7 @@ export interface SidebarProps {
   flat?: boolean;
 }
 
-/** 主导航：新会话 / 媒体库 / 探索项 / 订阅 / 活动，合并成一列扁平列表。
+/** 主导航：新会话 / 媒体库 / 订阅 / 探索项 / 活动，合并成一列扁平列表。
  *  「新会话」是 Agent 入口（管理员专属，成员侧隐藏——后端也会 403）。
  *
  *  这个数组的次序就是**内置默认顺序**：用户在「设置 → 外观 → 导航顺序」里排过
@@ -70,9 +70,9 @@ export interface SidebarProps {
  *  两边的图标与文案不会各写一份。 */
 export const SIDEBAR_NAV_ITEMS = [
   { id: "new", label: "新会话", icon: PlusIcon },
-  { id: "library", label: "媒体库", icon: LibraryIcon },
+  { id: "library", label: "媒体库", icon: LibraryStackIcon },
+  { id: "subscriptions", label: "我的订阅", icon: BookmarkFillIcon },
   ...exploreItems,
-  { id: "subscriptions", label: "我的订阅", icon: BookmarkIcon },
   // 「活动」（管理员专属）在这里占一位，只为**参与排序**：它带角标、落点还随
   // 角标变，因此渲染仍交给 JobCenter（见下方 navItems.map 的分支），这里登记的
   // label/icon 只给设置页的排序列表用。id 与 app-shell 的 navIdFromPath 对齐
@@ -134,13 +134,14 @@ export function Sidebar({
       {collapsed ? (
         <div className="flex flex-col items-center gap-2 px-3 pb-3 pt-5">
           <BrandHome onSelect={onSelect} homeId={isMember ? "library" : "new"}>
+            {/* 界面小尺寸用细笔画版标志（标准版的粗笔画在这里显得重一档） */}
             <Image
-              src="/brand/movieclaw-mark.png"
+              src="/brand/movieclaw-mark-ui.png"
               alt="MovieClaw"
-              width={512}
-              height={512}
+              width={256}
+              height={256}
               priority
-              className="size-7 object-contain"
+              className="size-6 object-contain"
             />
           </BrandHome>
           <CollapseToggle collapsed onClick={onToggleCollapse} />
@@ -148,16 +149,18 @@ export function Sidebar({
         </div>
       ) : (
         <div className="flex items-center justify-between px-4 pb-3 pt-4">
-          {/* 标志 + 字标：字标用真实文字（Inter 半粗、单色，颜色只由标志承担），比烤进图片里的字更清晰 */}
+          {/* 标志 + 字标：字标用真实文字（Inter 半粗、单色，颜色只由标志承担），比烤进图片里的字更清晰。
+              比例按品牌规范：字形高 20px（22px 方块里占 91%）≈ 字标大写高（17px × 0.727 ≈ 12.4px）的 1.6 倍；
+              标志用细笔画版，笔画约 2.3px，与半粗字标的笔画协调 */}
           <BrandHome onSelect={onSelect} homeId={isMember ? "library" : "new"}>
-            <span className="flex items-center gap-2">
+            <span className="flex items-center gap-1.5">
               <Image
-                src="/brand/movieclaw-mark.png"
+                src="/brand/movieclaw-mark-ui.png"
                 alt=""
-                width={512}
-                height={512}
+                width={256}
+                height={256}
                 priority
-                className="size-7 object-contain"
+                className="size-[22px] object-contain"
               />
               <span className="text-[17px] font-semibold tracking-[-0.022em] text-[var(--text)]">MovieClaw</span>
             </span>
@@ -410,6 +413,7 @@ function RecentSessions({
                 key={c.id}
                 title={c.title}
                 running={c.running}
+                owner={c.owner}
                 time={formatRelativeTime(new Date(c.updatedAt).toISOString())}
                 active={activeNav === c.id}
                 onClick={() => onSelect(c.id)}
@@ -458,6 +462,7 @@ function Section({
 function RunRow({
   title,
   running,
+  owner,
   time,
   active,
   onClick,
@@ -468,6 +473,8 @@ function RunRow({
 }: {
   title: string;
   running: boolean;
+  /** 插件发起的会话（"plugin:<条目 id>"）在时间前标一个「插件」 */
+  owner?: string | null;
   time: string;
   active: boolean;
   onClick: () => void;
@@ -535,6 +542,16 @@ function RunRow({
         <span className="flex-1 overflow-hidden whitespace-nowrap text-ui font-medium text-[var(--text)] [mask-image:linear-gradient(to_right,#000_calc(100%_-_16px),transparent)]">
           {title}
         </span>
+        {owner?.startsWith("plugin:") && (
+          <span
+            title={`由插件 ${owner.slice("plugin:".length)} 发起`}
+            className={`shrink-0 text-caption text-[var(--text-faint)] transition-opacity duration-200 ${
+              open ? "opacity-0" : "group-hover/run:opacity-0"
+            }`}
+          >
+            插件
+          </span>
+        )}
         {/* 行尾相对时间。桌面端悬停/菜单打开时让位给 ⋯ 按钮（两者占同一块地方）；
             移动端 ⋯ 恒定可见（.touch-reveal），改用右外边距给它留出位置。 */}
         <span

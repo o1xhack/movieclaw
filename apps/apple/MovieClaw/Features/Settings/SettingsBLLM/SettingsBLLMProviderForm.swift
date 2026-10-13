@@ -28,6 +28,8 @@ struct SettingsBLLMProviderForm: View {
     @State private var providerType: String
     @State private var baseUrl: String
     @State private var userAgent: String
+    /// 空串 = 跟随预设默认协议（不编码，后端沿用原值或用默认）
+    @State private var apiProtocol: String
     @State private var advancedOpen: Bool
     @State private var apiKey = ""
     @State private var showApiKey = false
@@ -38,6 +40,7 @@ struct SettingsBLLMProviderForm: View {
     @State private var draft = SettingsBLLMModelDraft()
     @State private var busy = false
     @State private var error: String?
+    @State private var discarding = false
 
     init(provider: API.LlmProviderView?, presets: [API.LlmPresetView], takenNames: [String], onSaved: @escaping () -> Void) {
         self.provider = provider
@@ -48,7 +51,8 @@ struct SettingsBLLMProviderForm: View {
         _providerType = State(initialValue: provider?.providerType ?? "bailian")
         _baseUrl = State(initialValue: provider?.baseUrl ?? "")
         _userAgent = State(initialValue: provider?.userAgent ?? "")
-        _advancedOpen = State(initialValue: provider?.userAgent != nil)
+        _apiProtocol = State(initialValue: provider?.apiProtocol ?? "")
+        _advancedOpen = State(initialValue: provider?.userAgent != nil || provider?.apiProtocol != nil)
         _extraModels = State(initialValue: provider?.extraModels ?? [])
     }
 
@@ -61,6 +65,9 @@ struct SettingsBLLMProviderForm: View {
     private var needBaseUrl: Bool { preset?.requiresBaseUrl ?? false }
     /// 端点没有预设默认值 = 用户自定义接入点，只有这类才需要端点与 User-Agent 输入
     private var canCustomizeEndpoint: Bool { preset?.baseUrl == nil }
+    /// 协议可切换的预设（OpenAI / 通用兼容端点）才展示协议选择
+    private var protocolOptions: [String] { preset?.selectableProtocols ?? [] }
+    private var canChooseProtocol: Bool { protocolOptions.count > 1 }
 
     /// 无内置目录的端点：把其它预设目录的模型也纳入可添加（换端点时模型名与参数往往一致）
     private var borrowedGroups: [(label: String, models: [API.ModelInfo])] {
@@ -74,6 +81,14 @@ struct SettingsBLLMProviderForm: View {
     private var trimmedBaseUrl: String { baseUrl.trimmingCharacters(in: .whitespaces) }
     private var trimmedUA: String { userAgent.trimmingCharacters(in: .whitespaces) }
 
+    /// 编辑时 Key 可留空沿用；但类型或端点变了必须重填（与后端同一判据），免得旧 Key 被发往新地址
+    private var apiKeyRequired: Bool {
+        guard let provider else { return true }
+        var url = trimmedBaseUrl
+        while url.hasSuffix("/") { url.removeLast() }
+        return providerType != provider.providerType || (url.isEmpty ? nil : url) != provider.baseUrl
+    }
+
     private var baseUrlValid: Bool {
         if trimmedBaseUrl.isEmpty { return !needBaseUrl }
         return trimmedBaseUrl.range(of: #"^https?://.+"#, options: .regularExpression) != nil
@@ -86,20 +101,34 @@ struct SettingsBLLMProviderForm: View {
 
     private var submitHint: String? {
         if name.contains("/") { return "实例名不能包含斜杠 /。" }
-        if apiKey.trimmingCharacters(in: .whitespaces).isEmpty { return "请填写 API Key。" }
+        if apiKeyRequired && apiKey.trimmingCharacters(in: .whitespaces).isEmpty {
+            return provider == nil ? "请填写 API Key。" : "更换了供应商或 API 端点，请重新填写 API Key。"
+        }
         if !baseUrlValid { return "请填写以 http:// 或 https:// 开头的完整 API 端点。" }
         if isCustomEndpoint && extras.isEmpty { return "请至少添加一个模型（接入后才有模型可用）。" }
         if !userAgentValid { return "User-Agent 包含不支持的字符，请检查高级设置。" }
         return nil
     }
 
+    private var dirty: Bool {
+        name != (provider?.name ?? "") || providerType != (provider?.providerType ?? "bailian")
+            || baseUrl != (provider?.baseUrl ?? "") || userAgent != (provider?.userAgent ?? "")
+            || apiProtocol != (provider?.apiProtocol ?? "")
+            || !apiKey.isEmpty || extraModels != (provider?.extraModels ?? [])
+            || (addingCustom && draft != SettingsBLLMModelDraft())
+    }
+
     // MARK: - 界面
 
     var body: some View {
-        NavigationStack {
-            Form {
+        SubsSheetScaffold(title: provider == nil ? "接入模型供应商" : "编辑供应商", onClose: {
+            if dirty { discarding = true } else { dismiss() }
+        }, confirm: SubsSheetConfirm(title: "保存并测试连接", enabled: submitHint == nil,
+                                     busy: busy, identifier: "llm-form-save") {
+            Task { await submit() }
+        }) {
                 if let error {
-                    Section {
+                    SettingsFormSection {
                         SettingsBNotice(text: error, tone: .danger)
                             .accessibilityIdentifier("llm-form-error")
                     }
@@ -111,43 +140,25 @@ struct SettingsBLLMProviderForm: View {
                     customModelSection
                 }
                 if let submitHint {
-                    Section {
+                    SettingsFormSection {
                         Text(submitHint)
                             .font(.caption)
                             .foregroundStyle(Theme.textFaint)
                             .accessibilityIdentifier("llm-form-hint")
                     }
                 }
-            }
-            .scrollContentBackground(.hidden)
-            .navigationTitle(provider.map { "编辑「\($0.name)」" } ?? "接入模型供应商")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("取消", systemImage: "xmark") { dismiss() }
-                        .accessibilityIdentifier("llm-form-cancel")
-                }
-            }
-            .safeAreaBar(edge: .bottom) {
-                SubsPrimaryButton(
-                    title: busy ? "保存中…" : "保存并测试连接",
-                    busy: busy,
-                    enabled: submitHint == nil,
-                    identifier: "llm-form-save"
-                ) {
-                    Task { await submit() }
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
-            }
-            .background(Theme.background.opacity(0.35))
         }
-        .presentationBackground(.regularMaterial)
-        .interactiveDismissDisabled(busy)
+        .disabled(busy)
+        .interactiveDismissDisabled(busy || dirty)
+        .alert("放弃未保存的修改？", isPresented: $discarding) {
+            Button("继续编辑", role: .cancel) { }
+            Button("放弃修改", role: .destructive) { dismiss() }
+        }
         .onChange(of: providerType) { _, _ in
             // 换供应商：端点 / UA / 高级设置 / 参数子表单都与上一家无关，一并清掉
             baseUrl = ""
             userAgent = ""
+            apiProtocol = ""
             advancedOpen = false
             addingCustom = false
         }
@@ -155,7 +166,7 @@ struct SettingsBLLMProviderForm: View {
 
     /// 供应商（下拉）+ 所选供应商的提示卡
     private var providerSection: some View {
-        Section {
+        SettingsFormSection {
             Picker("供应商", selection: $providerType) {
                 if presets.isEmpty {
                     Text("正在加载供应商…").tag(providerType)
@@ -184,7 +195,7 @@ struct SettingsBLLMProviderForm: View {
 
     /// 实例名 / API 端点 / API Key / 高级设置（User-Agent）
     private var connectionSection: some View {
-        Section {
+        SettingsFormSection {
             SettingsBTextField(
                 label: "实例名（可选）",
                 text: $name,
@@ -208,9 +219,28 @@ struct SettingsBLLMProviderForm: View {
 
             apiKeyField
 
-            // User-Agent 是排障用低频字段，默认折叠以缩短主流程
+            // API 协议与 User-Agent 都是低频字段，默认折叠以缩短主流程
             if canCustomizeEndpoint {
                 DisclosureGroup(isExpanded: $advancedOpen) {
+                    if canChooseProtocol {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Picker("API 协议", selection: Binding(
+                                mcGet: { apiProtocol.isEmpty ? (preset?.protocol ?? protocolOptions[0]) : apiProtocol },
+                                set: { apiProtocol = $0 }
+                            )) {
+                                ForEach(protocolOptions, id: \.self) { id in
+                                    Text(SettingsBLLMFormat.protocolLabel(id) + (id == preset?.protocol ? "（默认）" : ""))
+                                        .tag(id)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .accessibilityIdentifier("llm-form-api-protocol")
+                            Text("GPT-5.6 等推理模型要在调用工具时调节思维链强度，需选 Responses API；端点不支持 /v1/responses 时选 Chat Completions。")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textFaint)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     VStack(alignment: .leading, spacing: 6) {
                         Text("User-Agent（可选）").font(.subheadline).foregroundStyle(Theme.textMuted)
                         // 占位符直接展示留空时实际发送的 SDK 自带 UA（后端按 SDK 版本现算）
@@ -231,7 +261,8 @@ struct SettingsBLLMProviderForm: View {
                         Text("高级设置")
                         Spacer()
                         if !advancedOpen {
-                            Text("User-Agent").font(.caption).foregroundStyle(Theme.textFaint)
+                            Text(canChooseProtocol ? "API 协议 · User-Agent" : "User-Agent")
+                                .font(.caption).foregroundStyle(Theme.textFaint)
                         }
                     }
                 }
@@ -243,13 +274,13 @@ struct SettingsBLLMProviderForm: View {
     /// API Key：默认遮罩，右侧「显示 / 隐藏」切换；不回显已保存的密钥
     private var apiKeyField: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("API Key *").font(.subheadline).foregroundStyle(Theme.textMuted)
+            Text(apiKeyRequired ? "API Key *" : "API Key").font(.subheadline).foregroundStyle(Theme.textMuted)
             HStack {
                 Group {
                     if showApiKey {
-                        TextField(provider == nil ? "sk-…" : "出于安全，请重新填写", text: $apiKey)
+                        TextField(apiKeyRequired ? "sk-…" : "留空保持原密钥不变", text: $apiKey)
                     } else {
-                        SecureField(provider == nil ? "sk-…" : "出于安全，请重新填写", text: $apiKey)
+                        SecureField(apiKeyRequired ? "sk-…" : "留空保持原密钥不变", text: $apiKey)
                     }
                 }
                 .font(.body.monospaced())
@@ -264,7 +295,7 @@ struct SettingsBLLMProviderForm: View {
                     .accessibilityIdentifier("llm-form-api-key-toggle")
             }
             if provider != nil {
-                Text("已保存的密钥不会回显，修改其他配置时也需要重新填写。")
+                Text(apiKeyRequired ? "更换了供应商或 API 端点，需要重新填写密钥。" : "已保存的密钥不会回显；留空则继续使用原密钥。")
                     .font(.caption)
                     .foregroundStyle(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -277,7 +308,7 @@ struct SettingsBLLMProviderForm: View {
     @ViewBuilder
     private var catalogSection: some View {
         if isCustomEndpoint {
-            Section {
+            SettingsFormSection {
                 ForEach(extras, id: \.id) { m in
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -301,7 +332,7 @@ struct SettingsBLLMProviderForm: View {
                 Menu {
                     // 其它预设目录的模型：选中即入列，参数复用
                     ForEach(borrowedGroups, id: \.label) { group in
-                        Section("\(group.label) 目录（同名模型参数复用）") {
+                        SettingsFormSection("\(group.label) 目录（同名模型参数复用）") {
                             ForEach(group.models, id: \.id) { m in
                                 let hints = SettingsBLLMFormat.hints(m)
                                 Button(m.id + (hints.isEmpty ? "" : "（\(hints)）")) { borrow(m) }
@@ -319,7 +350,7 @@ struct SettingsBLLMProviderForm: View {
                 Text("兼容端点没有内置目录，请把端点上部署的模型添加进来（含参数）。接入后这些模型可在 AI 设定与对话框里选用；连接测试用第一个。")
             }
         } else if let preset {
-            Section {
+            SettingsFormSection {
                 Text("模型目录以「\(preset.displayName)」预设为准，共 \(catalog.count) 个模型，接入后可在 AI 设定与对话框里选用；连接测试用目录里第一个。")
                     .font(.caption)
                     .foregroundStyle(Theme.textFaint)
@@ -331,7 +362,7 @@ struct SettingsBLLMProviderForm: View {
 
     /// 自定义模型参数子表单：这些参数是 agent 做上下文 / 思考预算决策的依据，必填项带 *
     private var customModelSection: some View {
-        Section {
+        SettingsFormSection {
             SettingsBTextField(label: "模型 id *", text: $draft.id, placeholder: "如：my-vllm-model", mono: true, identifier: "llm-custom-id")
             SettingsBNumberField(label: "上下文长度 *", text: $draft.contextWindow, placeholder: "131072", identifier: "llm-custom-context")
             SettingsBNumberField(label: "最大输出 *", text: $draft.maxOutput, placeholder: "8192", identifier: "llm-custom-max-output")
@@ -464,7 +495,10 @@ struct SettingsBLLMProviderForm: View {
             baseUrl: trimmedBaseUrl.isEmpty ? nil : trimmedBaseUrl,
             // 端点固定的官方渠道不开放 UA 配置，一律回传 null
             userAgent: canCustomizeEndpoint && !trimmedUA.isEmpty ? trimmedUA : nil,
-            apiKey: apiKey.trimmingCharacters(in: .whitespaces),
+            // 没选过就不编码：新增跟随预设默认，编辑沿用原值
+            apiProtocol: canChooseProtocol && !apiProtocol.isEmpty ? apiProtocol : nil,
+            // 留空不编码：编辑时沿用原 Key
+            apiKey: apiKey.trimmingCharacters(in: .whitespaces).isEmpty ? nil : apiKey.trimmingCharacters(in: .whitespaces),
             // 连接测试模型由服务端取目录第一个；官方渠道不回传自定义目录
             defaultModel: nil,
             extraModels: extras.map(\.settingsBLLMInput)

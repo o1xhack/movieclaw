@@ -112,7 +112,7 @@ class DeviceRef:
     """请求来自哪台登录设备（``login_device`` 行的快照）。"""
 
     id: int
-    #: 客户端类型：web / ios / tvos / android / cli / worker / manual
+    #: 客户端类型：web / ios / tvos / macos / android / cli / worker / manual
     kind: str
     #: full=等同本人；transcode=只能转码（转码器凭证的形态上限）
     scope: str
@@ -122,6 +122,18 @@ class DeviceRef:
     def interactive(self) -> bool:
         """是不是人直接操作的第一方客户端（浏览器、App）。"""
         return login_devices.spec_of(self.kind).interactive
+
+
+@dataclass(frozen=True)
+class PluginGrant:
+    """插件主体的授权（docs/design/plugin-phase2a.md §3）。
+
+    ``operations`` 是**已展开**的 operationId 集合：声明里的领域通配（``subscriptions.*``）
+    在签发时按操作目录展开，危险操作（``x-cli-dangerous``）只认逐个列出的，通配不覆盖。
+    """
+
+    entry_id: str
+    operations: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -159,6 +171,9 @@ class Principal:
     #: 仅影片分享访客携带：可见面收窄到分享的那一个库、那一个条目
     #: （services/library/access.py）。其他主体恒为 None。
     share: ShareGrant | None = None
+    #: 仅插件主体携带：插件以 admin / member 的形状出现（代表谁由插件配置决定），
+    #: 再叠加按操作授权——有效权限 = 所代表的人的权限 ∩ 插件授权（api/deps.require_login）
+    plugin: PluginGrant | None = None
 
     @property
     def interactive(self) -> bool:
@@ -168,7 +183,7 @@ class Principal:
         命令行、转码器、手工令牌、Agent、MCP 不能（它们只能注销自己）。
         升级前签发的签名会话 Cookie 只可能来自浏览器，按人在操作处理。
         """
-        if self.kind not in ("admin", "member"):
+        if self.kind not in ("admin", "member") or self.plugin is not None:
             return False
         return self.device is None or self.device.interactive
 
@@ -755,6 +770,8 @@ _DEVICE_MAX_PENDING_PER_IP = 5
 _DEVICE_MAX_PENDING_TOTAL = 20
 #: 配对码字母表：去掉 0/O/1/I 等易混淆字符，人要念得出、抄得对。
 _USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -791,6 +808,67 @@ async def issue_mcp_token(endpoint_id: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# 插件凭证：进程内插件经 ASGI 调本进程接口时用（docs/design/plugin-phase2a.md §3）
+# ---------------------------------------------------------------------------
+
+PLUGIN_TOKEN_PREFIX = "mcpl_"
+
+
+@dataclass(frozen=True)
+class _PluginCredential:
+    grant: PluginGrant
+    member_id: int | None
+    """代表的成员；``None`` = 超管。"""
+
+
+#: 只在内存里：插件激活时签发、释放时作废，不落库，进程重启全部失效
+_plugin_tokens: dict[str, _PluginCredential] = {}
+
+
+def issue_plugin_token(grant: PluginGrant, *, member_id: int | None = None) -> str:
+    token = PLUGIN_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    _plugin_tokens[token] = _PluginCredential(grant=grant, member_id=member_id)
+    return token
+
+
+def revoke_plugin_token(token: str) -> None:
+    _plugin_tokens.pop(token, None)
+
+
+#: 插件网关请求的 ASGI scope 标记：插件令牌只在带这个标记的请求上有效（plugin_gateway.py）
+PLUGIN_GATEWAY_SCOPE = "movieclaw.plugin_gateway"
+
+
+def plugin_entry(token: str) -> str | None:
+    """插件令牌属于哪个条目；不是有效的插件令牌返回 ``None``。"""
+    credential = _plugin_tokens.get(token) if token.startswith(PLUGIN_TOKEN_PREFIX) else None
+    return credential.grant.entry_id if credential is not None else None
+
+
+async def _plugin_principal(token: str) -> Principal:
+    credential = _plugin_tokens.get(token)
+    if credential is None:
+        raise UnauthorizedException("插件凭证无效：插件已停用或服务已重启")
+    grant = credential.grant
+    name = f"plugin:{grant.entry_id}"
+    if credential.member_id is None:
+        return Principal(kind="admin", name=name, is_admin=True, plugin=grant)
+    # 权限每次按所代表的成员现装配：成员能力事后调整、被停用都立刻生效
+    async with get_database().session() as session:
+        member = await MemberRepository(session).get(credential.member_id)
+    if member is None or member.status != "active":
+        raise UnauthorizedException("插件代表的成员不存在或已停用")
+    return Principal(
+        kind="member",
+        name=name,
+        member_id=member.id,
+        is_admin=False,
+        member=member,
+        plugin=grant,
+    )
+
+
 async def verify_bearer_token(
     token: str,
     *,
@@ -802,6 +880,8 @@ async def verify_bearer_token(
     登录设备的权限**在这里按主人装配，而不是从令牌里读出来**：成员的能力开关
     事后调整立刻对他的 App、命令行生效，成员被停用则全部立刻失效。
     """
+    if token.startswith(PLUGIN_TOKEN_PREFIX):
+        return await _plugin_principal(token)
     # 先试无状态的 Agent 签名令牌（无 IO），再查落库的设备/手工令牌
     serializer = URLSafeSerializer(await _get_session_secret(), salt=_AGENT_TOKEN_SALT)
     try:
@@ -1034,6 +1114,7 @@ async def approve_device_request(user_code: str, approver: Principal) -> DeviceA
                 client_version=challenge.client_version,
                 platform=challenge.platform,
                 ip=challenge.source_ip or None,
+                approver_device_id=approver.device.id if approver.device else None,
             )
     except Exception:
         challenge.status = "pending"

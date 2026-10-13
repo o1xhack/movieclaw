@@ -12,11 +12,11 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from movieclaw_api.exceptions import ConflictException, NotFoundException
+from movieclaw_api.exceptions import BadRequestException, ConflictException, NotFoundException
 from movieclaw_api.services.download_health import adopt_landing_groups
 from movieclaw_api.services.downloader_paths import PathProbe, probe_mappings, summarize
 from movieclaw_db.engine import get_database
-from movieclaw_db.models.downloader_client import ClientType, DownloaderClient
+from movieclaw_db.models.downloader_client import DownloaderClient
 from movieclaw_db.models.site_credential import ConfigStatus
 from movieclaw_db.repositories.downloader_repo import DownloaderRepository
 from movieclaw_downloader import DownloaderConfig, DownloaderException, create_downloader
@@ -61,11 +61,24 @@ class DownloaderConfigService:
         if existing is not None and existing.id != exclude_id:
             raise ConflictException(f"名称「{name}」已被使用，请换一个")
 
+    @staticmethod
+    def _assert_type_known(client_type: str) -> None:
+        """类型要有已登记的适配器（官方插件或第三方插件提供）；没有就说清楚有哪些。"""
+        from movieclaw_downloader.registry import adapters
+
+        known = adapters()
+        if client_type not in known:
+            names = "、".join(f"{a.title}（{t}）" for t, a in known.items()) or "无"
+            raise BadRequestException(
+                f"没有「{client_type}」这种下载器：可用的类型有 {names}。"
+                "其他下载器需要先安装对应的下载器插件"
+            )
+
     async def create(
         self,
         *,
         name: str,
-        client_type: ClientType,
+        client_type: str,
         url: str,
         username: str | None,
         password: str | None,
@@ -74,6 +87,7 @@ class DownloaderConfigService:
         enabled: bool = True,
     ) -> DownloaderClient:
         """新增下载器配置（状态置 PENDING，等待异步测试连接）。"""
+        self._assert_type_known(client_type)
         await self._assert_name_available(name)
         return await self._repo.create(
             name=name,
@@ -91,7 +105,7 @@ class DownloaderConfigService:
         downloader_id: int,
         *,
         name: str,
-        client_type: ClientType,
+        client_type: str,
         url: str,
         username: str | None,
         password: str | None,
@@ -102,6 +116,8 @@ class DownloaderConfigService:
         """整体更新下载器配置；不存在抛 404，正在验证中抛 409。"""
         row = await self.get(downloader_id)
         self._assert_not_verifying(row)
+        if client_type != row.client_type:
+            self._assert_type_known(client_type)
         await self._assert_name_available(name, exclude_id=downloader_id)
         updated = await self._repo.update(
             downloader_id,
@@ -144,15 +160,48 @@ class DownloaderConfigService:
             raise NotFoundException(f"下载器不存在：id={downloader_id}")
         return await self.get(downloader_id)
 
-    async def delete(self, downloader_id: int) -> None:
-        """删除下载器配置；不存在抛 404，正在验证中抛 409。"""
+    async def delete(self, downloader_id: int) -> list[str]:
+        """删除下载器配置；不存在抛 404，正在验证中抛 409。
+
+        选它做刷流下载器的站点会先关闭刷流，返回这些站点的 site_id。用户为
+        站点单独选刷流下载器是为了与订阅/手动下载隔离，删掉后若让外键置空、
+        改投默认下载器，恰好破坏隔离（与「选定的下载器不可用就停、不改投」
+        同一原则，见 docs/design/site-protection-ratio-boost.md §2.10）。关闭刷流
+        不删种，想继续刷就重新开启并选一台。先关刷流再删配置：暂停中的站点
+        解除做种限速时还要连这台下载器。
+        """
+        from sqlmodel import select
+
+        from movieclaw_api.services.site_config import SiteConfigService
+        from movieclaw_db.models.site_credential import SiteCredential
+
         row = await self.get(downloader_id)
         self._assert_not_verifying(row)
+        boost_sites = (
+            (
+                await self._session.execute(
+                    select(SiteCredential.site_id).where(
+                        SiteCredential.boost_downloader_id == downloader_id,
+                        SiteCredential.boost_enabled == True,  # noqa: E712 -- SQL 表达式
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for site_id in boost_sites:
+            await SiteConfigService(self._session).set_ratio_boost(site_id, enabled=False)
+            logger.info(
+                "下载器「%s」将被删除，已关闭站点 %s 的刷流（它选的刷流下载器就是这台）",
+                row.name,
+                site_id,
+            )
         await self._repo.delete(downloader_id)
         # 配置已不存在，它的连接失败告警（若有）随之作废
         from movieclaw_api.services.system_notice import resolve_notices
 
         await resolve_notices(self._session, dedupe_key=f"downloader:{downloader_id}")
+        return list(boost_sites)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +227,7 @@ async def verify_downloader(downloader_id: int) -> None:
             return
 
         config = DownloaderConfig(
-            type=row.client_type.value,
+            type=row.client_type,
             url=row.url,
             username=row.username,
             password=repo.decrypted_password(row),
@@ -202,7 +251,7 @@ async def verify_downloader(downloader_id: int) -> None:
         finally:
             await downloader.close()
 
-        logger.info("下载器连接测试通过：%s（%s %s）", row.name, info.type.value, info.version)
+        logger.info("下载器连接测试通过：%s（%s %s）", row.name, info.type, info.version)
         # API 通了，再体检路径映射：两者是独立的故障面，绿灯必须两者都过才算数。
         # 只在连接成功后做——连接都不通时路径结论没有意义，也别让两种失败互相遮盖
         probes = probe_mappings(row.path_mappings)

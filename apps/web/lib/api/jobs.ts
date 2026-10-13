@@ -39,6 +39,8 @@ export interface JobResource {
 export interface JobView {
   id: string;
   job_type: string;
+  /** 任务类型显示名（插件任务由处理器给出）；旧服务端没有这个字段 */
+  job_type_label?: string | null;
   subject: string | null;
   definition_version: number;
   handler_revision: string;
@@ -99,6 +101,11 @@ export async function listJobs(options: {
   if (options.activeOnly) query.set("active_only", "true");
   const response = await request<ApiEnvelope<{ items: JobView[] }>>(`/jobs?${query}`);
   return response.data.items;
+}
+
+export async function getJob(jobId: string): Promise<JobView> {
+  const response = await request<ApiEnvelope<JobView>>(`/jobs/${jobId}`);
+  return response.data;
 }
 
 export async function cancelJob(jobId: string): Promise<JobView> {

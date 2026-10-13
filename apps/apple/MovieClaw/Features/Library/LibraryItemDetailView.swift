@@ -8,7 +8,7 @@ import SwiftUI
 /// 类型 / 系列与合集 → 媒体轨道（先挑版本与音轨字幕）→ 播放键（落点）+ 收藏 / 已看 → 简介 →
 /// 分集（剧集）→ 章节条 → 演职员 → 文件（管理员可删除 / 恢复 / 立即清理）→ 外部词条。
 ///
-/// - 播放键三态：播放 / 继续 mm:ss（下方进度条 + 剩余 X）/ 重新播放；续播点来自 `GET /playback/resume`，
+/// - 播放键三态：播放 / 继续 mm:ss（下方进度条 + 剩余 X）/ 重新播放，剧集写明哪一集（「继续 第 1 季第 3 集 · mm:ss」）；续播点来自 `GET /playback/resume`，
 ///   关掉播放器、服务端收下「停止」后重拉（`.playbackStopReported`），按钮立即跟上刚才看到的位置；
 /// - 收藏针对整部作品，已看针对当前单元（电影本身 / 选中的那一集），都走 `POST /playback/marks`；
 /// - 刮削进行中每 2 秒、章节图生成中每 3 秒（最多 20 次）重拉详情；
@@ -25,7 +25,6 @@ struct LibraryItemDetailView: View {
     @Environment(\.permissions) private var permissions
     @Environment(Feedback.self) private var feedback
     @Environment(Router.self) private var router
-    @Environment(\.openURL) private var openURL
 
     @State private var detail: API.LibraryItemDetailView?
     @State private var library: API.LibraryView?
@@ -43,6 +42,9 @@ struct LibraryItemDetailView: View {
     @State private var deleteFile: API.LibraryFileView?
     /// 修正识别结果拍板过：关窗时再重拉（同 Web reidentifyDirty）
     @State private var reidentifyDirty = false
+    /// 相似推荐（库内）与电影的作品系列：详情到手后拉一次，不随刮削轮询重拉（规则见 `ItemRelated`）
+    @State private var similar: [API.LibraryItemView] = []
+    @State private var series: API.CollectionSeriesView?
 
     /// 标题区滚出视野后才在导航栏显示片名、恢复顶部的滚动边缘效果（R-6，同发现详情页）：
     /// Hero 全出血到状态栏，返回 / ⋯ 直接浮在剧照上
@@ -114,6 +116,12 @@ struct LibraryItemDetailView: View {
         // 进了详情页多半要播：先把起播要用的连接连好（见 PlaybackPreconnect）
         .task { PlaybackPreconnect.warm(api: api) }
         .task(id: playUnitKey) { await loadResume() }
+        .task(id: detail?.mediaItemId) {
+            guard let detail else { return }
+            let rows = await ItemRelated.load(api: api, libraryId: libraryId, detail: detail)
+            similar = rows.similar
+            series = rows.series
+        }
         .onReceive(NotificationCenter.default.publisher(for: .playbackStopReported)) { note in
             guard note.userInfo?["mediaItemId"] as? Int == itemId else { return }
             Task { await loadResume(keepCurrent: true) }
@@ -188,7 +196,7 @@ struct LibraryItemDetailView: View {
 
     @ViewBuilder
     private func content(_ detail: API.LibraryItemDetailView) -> some View {
-        let heroURL = api.image(detail.backdropUrl ?? detail.posterUrl)
+        let heroURL = api.image(detail.backdropUrl ?? detail.posterUrl, width: Self.heroImageWidth)
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if let heroURL {
@@ -221,10 +229,17 @@ struct LibraryItemDetailView: View {
                             chapters: chapters,
                             onPlayFrom: { seconds in play(start: seconds) },
                             pending: detail.chaptersPending,
-                            resumeMs: watched.flatMap { $0.played ? nil : $0.positionMs }
+                            resumeMs: watched?.positionMs
                         )
                     }
                     castRow(detail)
+                    // 演职员 → 相似推荐 → 系列（与 Apple TV、Mac、Web 同一个顺序，2026-10-12 用户定）
+                    if !similar.isEmpty {
+                        LibrarySimilarSection(libraryId: libraryId, items: similar)
+                    }
+                    if let series {
+                        LibrarySeriesSection(series: series, libraryId: libraryId, itemId: itemId)
+                    }
                     let files = isMovie ? detail.files : (selectedEpisode?.files ?? [])
                     if !files.isEmpty {
                         fileSection(detail, files: files)
@@ -253,10 +268,21 @@ struct LibraryItemDetailView: View {
         return "\(url.absoluteString)#\(Int((heroSize.width / heroSize.height * 100).rounded()))"
     }
 
+    /// Hero 的显示高度：屏宽 × 1.15，最高屏高 62%
+    private static var heroHeight: CGFloat {
+        min(ImageWidth.screenSize.width * 1.15, ImageWidth.screenSize.height * 0.62)
+    }
+
+    /// Hero 的取图宽度：屏宽 × `heroHeight` 的竖框（393×452 点）铺满 16:9 背景要按高算——按宽只要 1179 像素，
+    /// 按高约 804 点 × 3 ≈ 2411 像素 → 2560 档（docs/design/image-sizing.md §6），不再取 4K 原图
+    private static var heroImageWidth: Int {
+        ImageWidth.cover(CGSize(width: ImageWidth.screenSize.width, height: heroHeight), aspect: ImageAspect.backdrop)
+    }
+
     /// 手机 Hero：剧照撑满宽度从状态栏底下铺起，顶部一抹暗托住返回键，底部渐变进页面底色
     /// （剧照底边的颜色，见 `HeroEdgeColor`），与下方整页无缝接上
     private func hero(_ url: URL) -> some View {
-        let height = min(UIScreen.main.bounds.width * 1.15, UIScreen.main.bounds.height * 0.62)
+        let height = Self.heroHeight
         let pageTint = edgeTint ?? Theme.background
         return Color.clear
             .frame(maxWidth: .infinity)
@@ -368,10 +394,11 @@ struct LibraryItemDetailView: View {
     /// 片名：有片名 Logo（透明底 PNG，语言档同订阅首页 Hero）就画 Logo，没有或加载失败回落文字。
     /// Logo 区高度固定，加载前后下面的集名 / 事实行不跳；整块合成一个静态文本读屏元素，
     /// 读屏与 UI 测试（item-title）照旧拿到片名。
-    /// 本地 Logo 资产存的是 TMDB 原图（给电视端 clearlogo 用，常见 4000px 宽），按显示宽度降采样再解码
+    /// 本地 Logo 资产存的是 TMDB 原图（给电视端 clearlogo 用，常见 4000px 宽）：按 Logo 框宽（260 点）取 `w`；
+    /// 旧服务器不认 `w` 会回原图，所以仍按显示宽度降采样再解码
     @ViewBuilder
     private func titleArt(_ detail: API.LibraryItemDetailView) -> some View {
-        if let raw = detail.logoUrl, let url = api.image(raw) {
+        if let raw = detail.logoUrl, let url = api.image(raw, width: ImageWidth.points(260)) {
             LazyImage(request: ImageRequest(url: url, processors: [.resize(width: 260)]),
                       transaction: Transaction(animation: .easeOut(duration: 0.25))) { state in
                 if let image = state.image {
@@ -438,16 +465,27 @@ struct LibraryItemDetailView: View {
 
     // MARK: 播放键
 
+    /// 播放键上的「第 1 季第 3 集」：选中的那一集；电影没有。特别篇（第 0 季）写「特别篇第 2 集」
+    private var unitLabel: String? {
+        guard !isMovie, let selectedEpisode else { return nil }
+        let season = selectedEpisode.season, episode = selectedEpisode.episode.episodeNumber
+        return season == 0 ? "特别篇第 \(episode) 集" : "第 \(season) 季第 \(episode) 集"
+    }
+
     @ViewBuilder
     private func playAction(favoriteLabel: String) -> some View {
         let position = watched?.positionMs ?? 0
         let duration = watched?.durationMs
         let finished = watched?.played ?? false
-        let resumable = !finished && position > 0
+        // 有续播点就接着播（与服务端起播同一口径）：看完后重看到一半的也算，已看标记保留
+        let resumable = position > 0
         let percent: Int? = resumable && (duration ?? 0) > 0 ? min(100, max(2, Int((Double(position) / Double(duration!) * 100).rounded()))) : nil
         let remaining: Int? = resumable && (duration ?? 0) > position ? Int((Double(duration! - position) / 60000).rounded()) : nil
-        // 看过一段：按钮直接写从哪里起播（点它就从这里接着放），下方进度条只说还剩多少
-        let label = finished ? "重新播放" : resumable ? "继续 \(Formatters.clock(Double(position) / 1000))" : "播放"
+        // 看过一段：按钮直接写从哪里起播（点它就从这里接着放），下方进度条只说还剩多少。
+        // 剧集写明是哪一集（同 Apple TV 版「继续 第 1 季第 3 集 · 46:56」）：只写「继续 46:56」看不出续的是第几集
+        let verb = resumable ? "继续" : finished ? "重新播放" : "播放"
+        let parts = [verb, unitLabel, resumable ? Formatters.clock(Double(position) / 1000) : nil].compactMap { $0 }
+        let label = parts.count > 2 ? "\(parts[0]) \(parts[1]) · \(parts[2])" : parts.joined(separator: " ")
         let progressText: String? = resumable
             ? remaining.map { $0 >= 1 ? "剩余 \(Self.runtimeText($0))" : "即将看完" } ?? (duration != nil ? "即将看完" : nil)
             : nil
@@ -500,7 +538,7 @@ struct LibraryItemDetailView: View {
                 }
                 .accessibilityIdentifier("item-progress")
             }
-            if finished, let watched, watched.playCount > 1 {
+            if finished, !resumable, let watched, watched.playCount > 1 {
                 Text("看过 \(watched.playCount) 次").font(.caption).monospacedDigit().foregroundStyle(.white.opacity(0.55))
             }
         }
@@ -572,7 +610,7 @@ struct LibraryItemDetailView: View {
                 Theme.surfaceRaised
                 Text(Self.initials(of: person.name)).font(.title2.weight(.bold)).foregroundStyle(.white.opacity(0.3))
                 if person.avatar != nil {
-                    RemoteImage(url: api.image(person.avatar, .posterCard), placeholderSymbol: "person.fill")
+                    RemoteImage(url: api.image(person.avatar, width: ImageWidth.points(96)), placeholderSymbol: "person.fill")
                 }
             }
             .aspectRatio(Theme.posterAspect, contentMode: .fit)
@@ -631,10 +669,7 @@ struct LibraryItemDetailView: View {
                 if tmdb > 0 { link("TMDB", "https://www.themoviedb.org/\(detail.kind)/\(tmdb)") }
                 if let imdb = detail.imdbId { link("IMDb", "https://www.imdb.com/title/\(imdb)/") }
                 if let douban = detail.doubanId {
-                    // 手机上优先唤起豆瓣 App（Web useDoubanAppHref 同一口径）
-                    link("豆瓣", douban.allSatisfy(\.isNumber)
-                        ? "https://www.douban.com/doubanapp/dispatch?uri=/movie/\(douban)/&dt_dapp=1"
-                        : "https://movie.douban.com/subject/\(douban)/")
+                    link("豆瓣", "https://movie.douban.com/subject/\(douban)/")
                 }
             }
             .font(.footnote)
@@ -645,7 +680,7 @@ struct LibraryItemDetailView: View {
     }
 
     private func link(_ label: String, _ url: String) -> some View {
-        Button("\(label) ↗") { if let url = URL(string: url) { openURL(url) } }
+        Button("\(label) ↗") { if let url = URL(string: url) { Task { await ExternalMediaLink.open(url) } } }
             .foregroundStyle(Theme.textMuted)
     }
 
@@ -662,7 +697,9 @@ struct LibraryItemDetailView: View {
         let canShare = permissions.isAdmin && detail.kind != "photo"
         return Menu {
             if permissions.canSearch {
-                Button("搜索资源") { router.push(.search(.init(q: detail.title))) }
+                Button("搜索资源") {
+                    router.push(.search(.init(q: detail.title, also: SearchScope.titleSearchAlso(detail.englishTitle, detail.originalTitle), scope: SearchScope.ofMediaKind(detail.kind).encoded)))
+                }
             }
             Button("加入合集…") { sheet = .addToCollection }
             if canShare {
@@ -884,7 +921,7 @@ struct LibraryItemDetailView: View {
         guard await feedback.confirm(
             "立即清理「\(file.fileName)」？",
             message: seeding
-                ? "该文件处于做种保护，可能仍被下载器做种。清理会从磁盘删除文件并可能中断做种任务（PT 站请留意保种要求），此操作不可恢复。"
+                ? "该文件留在原位置（原盘目录或没能移入回收站），清理会直接从磁盘删除，此操作不可恢复。若它仍被下载器做种，清理会中断做种任务（PT 站请留意保种要求）。"
                 : "将立即从回收站删除该文件，不再等待保留期，此操作不可恢复。",
             confirmTitle: "立即清理", destructive: true
         ) else { return }
@@ -945,7 +982,12 @@ struct ExpandablePlot: View {
 // MARK: - 分集
 
 /// 剧集分集区（Web `SeasonEpisodesSection`）：季选择 + 分集横滚卡；缺集置灰、看完绿勾、看了一半底部进度条。
-/// 默认落在第一个在库的季与集；路由带了 season/episode 时定位到那一集并滚到可见处。
+/// 默认落在接着看的那一集（同 Apple TV 版）：路由带了 season/episode 时是那一集；否则季取首页「接下来继续」里这部剧的那一季
+/// （没有就第一个在库的正片季），集取这一季的锚点（`anchorEpisode`：服务端给的接着看的那一集，没给退回客户端规则）。落点不在第一集时滚到可见处。
+/// 一季超过 50 集分段（docs/design/long-season-episode-ranges.md）：标题行右侧「全部 N 集 ›」开宫格面板，下面一排段胶囊，
+/// 横排只放当前段的集、首尾各一张「上一段 / 下一段」；锚点的段带橙点。≤50 集不出段胶囊与面板入口。
+/// 本季有观看记录（任一集看过或看了一半）时锚点那张卡标「接着看」，短季同样标。
+/// 刷新后（播放回来、标为已看）锚点变了就选中新锚点、段跟过去；没变不动。
 struct SeasonEpisodesSection: View {
     let libraryId: Int
     let detail: API.LibraryItemDetailView
@@ -959,10 +1001,29 @@ struct SeasonEpisodesSection: View {
     @State private var data: API.SeasonEpisodesView?
     @State private var failed = false
     @State private var selected: Int?
+    /// 分段时横排正在显示的段（`EpisodeRange.index`）；不分段时不用
+    @State private var range: Int?
+    /// 选中集换了要把横排滚到它（换段、宫格里点了一集、锚点变了）
+    @State private var scrollRequest = 0
+    @State private var showsAll = false
 
     private var ownedSeasons: Set<Int> { Set(detail.files.map(\.seasonNumber)) }
-    private var requestedSeason: Int? { initialSeason.flatMap { ownedSeasons.contains($0) ? $0 : nil } }
-    private var currentSeason: Int { season ?? requestedSeason ?? detail.seasons.first { ownedSeasons.contains($0) } ?? detail.seasons.first ?? 1 }
+    /// 打开时落在哪一季哪一集：路由指定的 → 首页「接下来继续」里这部剧的那一季（集不取它的，由这一季的锚点定）
+    private var entry: (season: Int, episode: Int?)? {
+        if let initialSeason, ownedSeasons.contains(initialSeason) { return (initialSeason, initialEpisode) }
+        guard let next = LibraryHomeStore.shared.upNext?.first(where: { $0.mediaItemId == detail.mediaItemId && $0.kind == "tv" }),
+              ownedSeasons.contains(next.seasonNumber) else { return nil }
+        return (next.seasonNumber, nil)
+    }
+    /// 本季的段：不分段时为空
+    private var ranges: [EpisodeRange] { data.map { EpisodeRanges.ranges($0.episodes) } ?? [] }
+    /// 没有落点时打开第一个有片源的正片季（特别篇排在最前，但不该先开它）
+    private var currentSeason: Int {
+        season ?? entry?.season
+            ?? detail.seasons.first { $0 > 0 && ownedSeasons.contains($0) }
+            ?? detail.seasons.first { ownedSeasons.contains($0) }
+            ?? detail.seasons.first { $0 > 0 } ?? detail.seasons.first ?? 1
+    }
 
     private func seasonLabel(_ s: Int) -> String {
         let name = s == 0 ? "特别篇" : "第 \(s) 季"
@@ -970,6 +1031,11 @@ struct SeasonEpisodesSection: View {
     }
 
     var body: some View {
+        let ranges = self.ranges
+        let anchor = data?.anchorEpisode?.episodeNumber
+        // 「接着看」只在本季有观看记录时标：一集没碰过的季，锚点只是第一集，不标
+        let watchedAny = data?.episodes.contains { $0.played || $0.positionMs > 0 } ?? false
+        let current = ranges.first { $0.index == range } ?? ranges.first
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Text("分集").font(.title3.weight(.semibold)).foregroundStyle(Theme.text)
@@ -992,7 +1058,20 @@ struct SeasonEpisodesSection: View {
                 } else {
                     Text(seasonLabel(currentSeason)).font(.subheadline).foregroundStyle(Theme.textMuted)
                 }
-                if let data {
+                if let data, !ranges.isEmpty {
+                    Spacer(minLength: 0)
+                    Button { showsAll = true } label: {
+                        HStack(spacing: 2) {
+                            Text("全部 \(data.episodes.count) 集")
+                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                        }
+                        .font(.subheadline).monospacedDigit().foregroundStyle(Theme.textMuted)
+                        .padding(.vertical, 6)
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("episode-ranges-all")
+                } else if let data {
                     Text("在库 \(data.episodes.filter(\.owned).count) / \(data.episodes.count) 集")
                         .font(.subheadline).monospacedDigit().foregroundStyle(Theme.textFaint)
                 }
@@ -1002,25 +1081,50 @@ struct SeasonEpisodesSection: View {
                 Text("分集信息加载失败，请稍后重试。").font(.subheadline).foregroundStyle(Theme.textMuted)
                     .padding(.horizontal, Theme.pagePadding)
             } else if let data {
+                if let current {
+                    EpisodeRangeChips(ranges: ranges, current: current.index, anchor: anchor) { switchRange(to: $0, anchor: anchor) }
+                }
+                // 分段时横排只放当前段的集，首尾各一张「上一段 / 下一段」
+                let shown = current.map { r in data.episodes.filter { r.contains($0.episodeNumber) } } ?? data.episodes
+                let position = current.flatMap { r in ranges.firstIndex(of: r) }
+                let previous = position.flatMap { $0 > 0 ? ranges[$0 - 1] : nil }
+                let next = position.flatMap { $0 + 1 < ranges.count ? ranges[$0 + 1] : nil }
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(alignment: .top, spacing: 12) {
-                            ForEach(data.episodes, id: \.episodeNumber) { episode in
-                                EpisodeCard(episode: episode, selected: episode.episodeNumber == selected) {
+                        // 一排最多 50 集（分段后一段），不用懒加载：懒加载横排按估算的位置滚，远处的卡常停不准
+                        HStack(alignment: .top, spacing: 12) {
+                            if let previous {
+                                RangeEdgeCard(title: "← 上一段", range: previous) { switchRange(to: previous, anchor: anchor) }
+                                    .accessibilityIdentifier("episode-range-prev")
+                            }
+                            ForEach(shown, id: \.episodeNumber) { episode in
+                                EpisodeCard(episode: episode, selected: episode.episodeNumber == selected,
+                                            resume: watchedAny && episode.episodeNumber == anchor) {
                                     selected = episode.episodeNumber
                                     report()
                                 }
                                 .id(episode.episodeNumber)
                             }
+                            if let next {
+                                RangeEdgeCard(title: "下一段 →", range: next) { switchRange(to: next, anchor: anchor) }
+                                    .accessibilityIdentifier("episode-range-next")
+                            }
                         }
                         .padding(.horizontal, Theme.pagePadding)
                     }
                     .scrollClipDisabled()
-                    .task(id: data.seasonNumber) {
-                        if currentSeason == requestedSeason, let target = initialEpisode, selected == target {
+                    .task(id: "\(data.seasonNumber)|\(scrollRequest)") {
+                        if let target = selected, current != nil || target != data.episodes.first?.episodeNumber {
                             try? await Task.sleep(for: .milliseconds(200))
                             withAnimation { proxy.scrollTo(target, anchor: .center) }
                         }
+                    }
+                }
+                .sheet(isPresented: $showsAll) {
+                    EpisodeGridSheet(episodes: data.episodes, ranges: ranges, anchor: anchor, selected: selected) { number in
+                        showsAll = false
+                        lock(number)
+                        report()
                     }
                 }
             } else {
@@ -1034,11 +1138,14 @@ struct SeasonEpisodesSection: View {
         }
         .task(id: "\(currentSeason)|\(detail.fileCount)") { await load(reset: true) }
         .onChange(of: refreshKey) { Task { await load(reset: false) } }
+        // 作容器：标识不盖掉里面季选择、段胶囊、「全部 N 集」各自的标识
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("season-episodes")
     }
 
     private func load(reset: Bool) async {
         let s = currentSeason
+        let previousAnchor = data?.anchorEpisode?.episodeNumber
         if reset {
             data = nil
             failed = false
@@ -1048,15 +1155,33 @@ struct SeasonEpisodesSection: View {
             guard s == currentSeason else { return }
             data = result
             if reset {
-                let requested = s == requestedSeason && initialEpisode != nil
-                    ? result.episodes.first { $0.episodeNumber == initialEpisode && $0.owned } : nil
-                selected = (requested ?? result.episodes.first(where: \.owned) ?? result.episodes.first)?.episodeNumber
+                let target = s == entry?.season ? entry?.episode : nil
+                let requested = target.flatMap { t in result.episodes.first { $0.episodeNumber == t && $0.owned } }
+                lock((requested ?? result.anchorEpisode)?.episodeNumber)
+                // 定住打开的这一季：「接下来继续」之后刷新（比如刚看完一季）不把分集区跳到别的季
+                if season == nil { season = s }
+            } else if let anchor = result.anchorEpisode?.episodeNumber, anchor != previousAnchor {
+                // 播放回来锚点变了（看完 1050 → 1051）：选中新锚点、段跟过去；没变就不动，保留用户在别的段的浏览
+                lock(anchor)
             }
             report()
         } catch is CancellationError {
         } catch {
             if reset { failed = true }
         }
+    }
+
+    /// 选中一集并把段锁到它所在的段、横排滚到它
+    private func lock(_ number: Int?) {
+        selected = number
+        range = number.map(EpisodeRanges.index(of:))
+        scrollRequest += 1
+    }
+
+    /// 手动换段：段里有锚点选锚点，否则段首
+    private func switchRange(to target: EpisodeRange, anchor: Int?) {
+        lock(EpisodeRanges.entry(of: target, anchor: anchor))
+        report()
     }
 
     private func report() {
@@ -1072,16 +1197,26 @@ struct SeasonEpisodesSection: View {
 private struct EpisodeCard: View {
     let episode: API.EpisodeView
     let selected: Bool
+    /// 本季有观看记录时，锚点那张卡左上角标「接着看」
+    var resume = false
     var onSelect: () -> Void
     @Environment(\.api) private var api
 
     var body: some View {
         Button(action: onSelect) {
             VStack(alignment: .leading, spacing: 6) {
-                LibraryArtwork(url: api.image(episode.stillUrl, .landscapeCard), frameAspect: 16 / 9,
+                LibraryArtwork(url: api.image(episode.stillUrl, width: ImageWidth.points(200)), frameAspect: 16 / 9,
                                fallbackText: episode.stillUrl == nil ? "\(episode.episodeNumber)" : nil)
                     .clipShape(.rect(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(selected ? .white.opacity(0.85) : .white.opacity(0.08), lineWidth: selected ? 2 : 1))
+                    .overlay(alignment: .topLeading) {
+                        if resume {
+                            Text("接着看").font(.caption2.weight(.bold)).foregroundStyle(.black)
+                                .padding(.horizontal, 6).padding(.vertical, 1)
+                                .background(Color.orange, in: .rect(cornerRadius: 5))
+                                .padding(6)
+                        }
+                    }
                     .overlay(alignment: .topTrailing) {
                         HStack(spacing: 4) {
                             if !episode.owned {
@@ -1097,12 +1232,14 @@ private struct EpisodeCard: View {
                         .padding(6)
                     }
                     .overlay(alignment: .bottom) {
-                        let progress = episode.played ? 100 : episode.progressPercent
+                        // 看完后重看到一半：对勾保留，进度条按这次看到哪画
+                        let resuming = episode.positionMs > 0
+                        let progress = resuming ? episode.progressPercent : episode.played ? 100 : nil
                         if let progress {
                             GeometryReader { proxy in
                                 ZStack(alignment: .leading) {
                                     Capsule().fill(.white.opacity(0.25))
-                                    Capsule().fill(episode.played ? Theme.success : Theme.accent2).frame(width: proxy.size.width * CGFloat(progress) / 100)
+                                    Capsule().fill(resuming ? Theme.accent2 : Theme.success).frame(width: proxy.size.width * CGFloat(progress) / 100)
                                 }
                             }
                             .frame(height: 3).padding(6)
@@ -1123,7 +1260,194 @@ private struct EpisodeCard: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(resume ? "接着看" : "")
         .accessibilityIdentifier("episode-\(episode.episodeNumber)")
+    }
+}
+
+/// 横排首尾的「← 上一段 / 下一段 →」小卡：点了换到那一段
+private struct RangeEdgeCard: View {
+    let title: String
+    let range: EpisodeRange
+    var onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(spacing: 2) {
+                Text(title)
+                Text(range.label).monospacedDigit()
+            }
+            .font(.caption).foregroundStyle(Theme.textMuted)
+            .frame(width: 96, height: 200 * 9 / 16)
+            .background(.white.opacity(0.04), in: .rect(cornerRadius: 12))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// 一排段胶囊（分集区与「全部分集」面板共用）：选中的段白底黑字，锚点所在的段右上角橙点；选中段滚到中间
+private struct EpisodeRangeChips: View {
+    let ranges: [EpisodeRange]
+    let current: Int
+    let anchor: Int?
+    var idPrefix = "episode-range"
+    var onSelect: (EpisodeRange) -> Void
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(ranges) { range in
+                        let on = range.index == current
+                        let resume = anchor.map(range.contains) ?? false
+                        Button { onSelect(range) } label: {
+                            Text(range.label)
+                                .font(.subheadline.weight(on ? .semibold : .regular)).monospacedDigit()
+                                .foregroundStyle(on ? .black : Theme.textMuted)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(on ? Color.white : Color.white.opacity(0.06), in: .capsule)
+                                .overlay(alignment: .topTrailing) {
+                                    if resume {
+                                        Circle().fill(Color.orange).frame(width: 6, height: 6).padding(.top, 3).padding(.trailing, 5)
+                                    }
+                                }
+                                .contentShape(.capsule)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(on ? .isSelected : [])
+                        .accessibilityValue(resume ? "接着看" : "")
+                        .accessibilityIdentifier("\(idPrefix)-\(range.index)")
+                        .id(range.index)
+                    }
+                }
+                .padding(.horizontal, Theme.pagePadding)
+            }
+            .scrollClipDisabled()
+            .task(id: current) {
+                try? await Task.sleep(for: .milliseconds(50))
+                withAnimation { proxy.scrollTo(current, anchor: .center) }
+            }
+        }
+    }
+}
+
+/// 「全部分集」面板：段胶囊（打开时落在锚点的段）+ 5 列数字宫格。格子：已看 ✓、进度条、缺集虚线、锚点橙边、选中白底；
+/// 锚点在这一段时滚到可见（第 50 集在宫格最底下）。点格子交给分集区：关面板、选中那一集、段与横排跟过去
+private struct EpisodeGridSheet: View {
+    let episodes: [API.EpisodeView]
+    let ranges: [EpisodeRange]
+    let anchor: Int?
+    let selected: Int?
+    var onPick: (Int) -> Void
+    @State private var range: Int
+    @Environment(\.dismiss) private var dismiss
+
+    init(episodes: [API.EpisodeView], ranges: [EpisodeRange], anchor: Int?, selected: Int?, onPick: @escaping (Int) -> Void) {
+        self.episodes = episodes
+        self.ranges = ranges
+        self.anchor = anchor
+        self.selected = selected
+        self.onPick = onPick
+        let start = (anchor ?? selected).flatMap { EpisodeRanges.range(containing: $0, in: ranges) } ?? ranges.first
+        _range = State(initialValue: start?.index ?? 0)
+    }
+
+    var body: some View {
+        let current = ranges.first { $0.index == range }
+        let shown = current.map { r in episodes.filter { r.contains($0.episodeNumber) } } ?? episodes
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("全部分集").font(.title3.weight(.semibold)).foregroundStyle(Theme.text)
+                Text("在库 \(episodes.filter(\.owned).count) / \(episodes.count)")
+                    .font(.footnote).monospacedDigit().foregroundStyle(Theme.textFaint)
+                Spacer(minLength: 0)
+                Button("完成") { dismiss() }
+                    .font(.subheadline.weight(.medium)).foregroundStyle(Theme.textMuted)
+                    .accessibilityIdentifier("episode-grid-done")
+            }
+            .padding(.horizontal, Theme.pagePadding)
+            .padding(.top, 24)
+            EpisodeRangeChips(ranges: ranges, current: range, anchor: anchor, idPrefix: "episode-grid-range") { range = $0.index }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
+                        ForEach(shown, id: \.episodeNumber) { episode in
+                            EpisodeGridCell(episode: episode, anchor: episode.episodeNumber == anchor,
+                                            selected: episode.episodeNumber == selected) { onPick(episode.episodeNumber) }
+                                .id(episode.episodeNumber)
+                        }
+                    }
+                    .padding(.horizontal, Theme.pagePadding)
+                    .padding(.bottom, 30)
+                }
+                .task(id: range) {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    if let anchor, current?.contains(anchor) == true {
+                        proxy.scrollTo(anchor, anchor: .center)
+                    } else if let first = shown.first {
+                        proxy.scrollTo(first.episodeNumber, anchor: .top)
+                    }
+                }
+            }
+        }
+        .presentationDetents([.fraction(0.72), .large])
+        .presentationDragIndicator(.visible)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("episode-grid")
+    }
+}
+
+private struct EpisodeGridCell: View {
+    let episode: API.EpisodeView
+    let anchor: Bool
+    let selected: Bool
+    var onSelect: () -> Void
+
+    var body: some View {
+        let progress = episode.positionMs > 0 ? episode.progressPercent : nil
+        let states: [String?] = [anchor ? "接着看" : nil, episode.owned ? nil : "缺集", episode.played ? "已看" : nil,
+                                 progress.map { "看到 \($0)%" }]
+        let fill: Color = selected ? .white : !episode.owned ? .clear : episode.played ? .white.opacity(0.03) : .white.opacity(0.06)
+        let ink: Color = selected ? .black : !episode.owned ? Theme.textFaint : episode.played ? Theme.textMuted : Theme.text
+        Button(action: onSelect) {
+            Text("\(episode.episodeNumber)")
+                .font(.body.weight(selected ? .semibold : .regular)).monospacedDigit()
+                .foregroundStyle(ink)
+                .frame(maxWidth: .infinity).frame(height: 46)
+                .background(fill, in: .rect(cornerRadius: 10))
+                .overlay {
+                    if !episode.owned {
+                        RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    }
+                }
+                .overlay(alignment: .topTrailing) {
+                    if episode.played {
+                        // 已看由 accessibilityValue 说；勾号本身不进无障碍树，免得按钮被当成「已选中」
+                        Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundStyle(Theme.success).padding(5)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .overlay(alignment: .bottomLeading) {
+                    if let progress {
+                        GeometryReader { proxy in
+                            Rectangle().fill(selected ? .black.opacity(0.4) : Theme.accent2)
+                                .frame(width: proxy.size.width * CGFloat(progress) / 100, height: 3)
+                                .frame(maxHeight: .infinity, alignment: .bottom)
+                        }
+                    }
+                }
+                .clipShape(.rect(cornerRadius: 10))
+                .overlay {
+                    if anchor { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange, lineWidth: 2) }
+                }
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("第 \(episode.episodeNumber) 集")
+        .accessibilityValue(states.compactMap { $0 }.joined(separator: "，"))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier("episode-grid-\(episode.episodeNumber)")
     }
 }
 
@@ -1251,7 +1575,7 @@ struct LibraryFileRow: View {
     }
 
     static func purgeCountdown(_ raw: String?) -> String {
-        guard let raw else { return "做种保护中，不自动清理" }
+        guard let raw else { return "不自动清理" }
         guard let date = Formatters.date(raw) else { return "即将自动清理" }
         let ms = date.timeIntervalSinceNow * 1000
         if ms <= 0 { return "即将自动清理" }

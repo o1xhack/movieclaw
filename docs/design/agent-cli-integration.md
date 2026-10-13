@@ -102,7 +102,7 @@ movieclaw 的官方命令行工具。用于从 TMDB 和豆瓣发现实时热点�
   get-title-details 看资料/演职员/剧照/相关推荐）
 - dl       qBittorrent/Transmission 下载器与投递（接入/验证/启停/设默认实例，
   配置保存路径与路径映射，预演落点并提交种子）
-- extension Chromium 浏览器插件 Cookie 同步（管理同步令牌/支持站点，把页面中的
+- extension Chromium 浏览器扩展 Cookie 同步（管理同步令牌/支持站点，把页面中的
   httpOnly 站点 Cookie 安全同步到服务端）
 - health   API 存活检查（通常优先用顶级 status 查看更完整的部署状态）
 - jobs     后台作业（按来源/状态/类型查询，查看事件与执行器健康，等待/取消/重试；
@@ -118,7 +118,7 @@ movieclaw 的官方命令行工具。用于从 TMDB 和豆瓣发现实时热点�
 - rules    订阅过滤规则组（管理分辨率、编码、HDR、字幕/音轨、免费/H&R、做种数、
   体积和制作组等条件及默认规则组）
 - search   统一搜索（titles 搜 TMDB/豆瓣影视条目，torrents 跨 PT 站点搜种子并可把
-  结果行号交给 download，library-items 搜已入库内容；另可管理搜索预设和历史结果）
+  结果行号交给 download，library 按片名/拼音/人物搜已入库内容；另可管理搜索预设和历史结果）
 - session  用户与智能体的会话管理（发起新对话或继续已有对话，按指定用户消息重新提问，
   读取并分析完整 message/compaction 轨迹；也可重命名、压缩上下文、跟随或停止处理，
   以及删除会话）
@@ -140,7 +140,7 @@ movieclaw 的官方命令行工具。用于从 TMDB 和豆瓣发现实时热点�
 
 使用协议：
 - 常用链路：search titles 找片/找剧 → subscriptions create 订阅；search torrents
-  搜 PT 种子 → download 投递；search library-items 查库存，discover 浏览榜单，
+  搜 PT 种子 → download 投递；search library 查库存，discover 浏览榜单，
   library 管理已入库内容；订阅会持续追踪，并在出现符合规则的新资源
   后自动搜索、下载和整理入库。
 - 输出即数据：stdout 是 JSON（默认），stderr 是过程提示与错误原因。

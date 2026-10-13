@@ -6,8 +6,8 @@ extension PhotoWallView {
     ///
     /// 舞台交互（缩放、翻页、缩略条、收放控件）全在 `LibraryZoomableImage.Lightbox` 里，
     /// 与图廊、章节图的灯箱共用；这里只负责图片库特有的三件事：
-    /// - **三级地址**：墙上的缩略图 → 长边 2048 的屏幕适配图（`?size=screen`，服务端按原图
-    ///   惰性派生并缓存）→ 只有放大后才拉几 MB 的原图；
+    /// - **三级地址**：墙上的缩略图 → 屏宽像素的屏幕适配图（原图地址带 `w`，服务端按原图
+    ///   惰性派生并缓存）→ 只有放大后才拉几 MB 的原图（不带 `w`）；
     /// - **拍摄信息**面板：文件名、拍摄日期、尺寸、大小、格式、路径，按需从条目详情接口
     ///   （`GET /libraries/{lib}/items/{id}`）拉，同一张只拉一次；
     /// - **下载原图**：Web 在 iOS 桌面应用里先下载、再弹系统分享面板，失败在灯箱顶部提示原因；
@@ -22,8 +22,9 @@ extension PhotoWallView {
         @Environment(\.api) private var api
         @State private var infoOpen = false
         @State private var details: [Int: API.LibraryItemDetailView] = [:]
-        /// 下载原图的进度 / 失败提示（画面顶部）
+        /// 下载原图的进度（画面顶部）；失败走全 App 统一的顶部提示
         @State private var downloadNote: String?
+        @Environment(Feedback.self) private var feedback
         /// 下好的原图：弹系统分享面板
         @State private var shareFile: SharedOriginal?
 
@@ -65,7 +66,7 @@ extension PhotoWallView {
 
         private static let preparing = "正在准备下载…"
 
-        /// 先把原图下到临时目录，成功再弹分享面板；失败在灯箱顶部写明原因，4 秒后收起
+        /// 先把原图下到临时目录，成功再弹分享面板；失败弹提示写明原因
         private func download(fileId: Int, item: API.LibraryItemView) async {
             downloadNote = Self.preparing
             do {
@@ -79,10 +80,9 @@ extension PhotoWallView {
             } catch is CancellationError {
                 downloadNote = nil
             } catch {
+                downloadNote = nil
                 let reason = error.localizedDescription
-                downloadNote = "下载原图失败：\(reason.isEmpty ? "请检查网络后重试" : reason)"
-                try? await Task.sleep(for: .seconds(4))
-                if downloadNote?.hasPrefix("下载原图失败") == true { downloadNote = nil }
+                feedback.error("下载原图失败：\(reason.isEmpty ? "请检查网络后重试" : reason)")
             }
         }
 
@@ -96,8 +96,9 @@ extension PhotoWallView {
                 return LibraryZoomableImage.Slide(
                     id: i,
                     title: item.title,
-                    thumbURL: api.image(item.posterUrl),
-                    screenURL: original.map { api.url($0, query: [URLQueryItem(name: "size", value: "screen")]) },
+                    // 与墙上瓦片同一个地址（同一密度档的宽度）：墙已经加载过，打开灯箱直接命中缓存
+                    thumbURL: api.image(item.posterUrl, width: GalleryPrefs.shared.density.tileImageWidth),
+                    screenURL: original.flatMap { api.image($0, width: ImageWidth.screen) },
                     fullURL: original.map { api.url($0) },
                     aspect: item.primaryAspect
                 )

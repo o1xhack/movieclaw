@@ -1,5 +1,6 @@
 import { publicEnv } from "@/lib/env";
 import { request, resolveRequestUrl } from "@/lib/http";
+import { snapWidth } from "@/lib/image-width";
 import type { ItemSource, LibraryKind, MediaType } from "@/lib/media-types";
 
 /** 后端统一响应信封（见 movieclaw_api.schemas.response.ApiResponse） */
@@ -683,12 +684,20 @@ export function getKindSummary(
   return unwrap(request<ApiEnvelope<LibraryKindSummary>>(`/libraries/kinds/${kind}${suffix}`));
 }
 
-/** 媒体库搜索结果的一组：一个库内命中关键词的条目（组内按标题拼音排序）。 */
-export interface LibrarySearchGroup {
-  library_id: number;
-  library_name: string;
-  kind: MediaType;
-  items: LibraryItem[];
+/**
+ * 首页「按类型找电影 / 剧集」色块：这一类型跨库每个 TMDB 类型有几部（去重），
+ * 外加一张封面（这个类型最近入库那部片的剧照，部数多的类型先挑、不重复）。
+ * 只回有片的类型、按部数倒序；value 是 genre id，点进去带 `?g=value` 开墙。
+ */
+export function listKindGenres(kind: "movie" | "tv"): Promise<KindGenre[]> {
+  return unwrap(request<ApiEnvelope<KindGenre[]>>(`/libraries/kinds/${kind}/genres`));
+}
+
+/** 首页类型色块的一格：类型、部数，以及贴在卡片上的最近入库那部片的剧照（没有可用剧照时为空）。 */
+export interface KindGenre extends FacetValue {
+  cover_item_id: number | null;
+  cover_title: string | null;
+  cover_url: string | null;
 }
 
 /** 海报墙 A-Z 索引条的一档（按标题排序下的首字母分组）。 */
@@ -846,16 +855,17 @@ export function listLibraryGallery(
 
 /**
  * 图片库原图地址（按台账文件 id，服务端按库可见性鉴权）。
- * - `size: "screen"`：长边 ≤2048 的屏幕适配 WebP，灯箱先看它（几百 KB），放大才拉原图；
+ * - `width`：需要的像素宽（取到服务端宽度阶梯，见 lib/image-width.ts），灯箱舞台按
+ *   屏宽像素取（几百 KB），放大到 1:1 才拉原图；取代旧的 `size=screen`；
  * - `download`：原图作为附件下载。
  */
 export function libraryFileOriginalUrl(
   fileId: number,
-  options: { download?: boolean; size?: "screen" } = {},
+  options: { download?: boolean; width?: number } = {},
 ): string {
   const query = new URLSearchParams();
   if (options.download) query.set("download", "1");
-  else if (options.size) query.set("size", options.size);
+  else if (options.width) query.set("w", String(snapWidth(options.width)));
   const suffix = query.size > 0 ? `?${query}` : "";
   return resolveRequestUrl(`/libraries/files/${fileId}/original${suffix}`);
 }
@@ -1023,9 +1033,9 @@ export function refreshItemMetadata(
 
 /** 「更换图片」弹层里的一张候选图。 */
 export interface ArtworkCandidate {
-  /** TMDB 图片路径（选定时原样回传） */
+  /** 图片路径（选定时原样回传）：TMDB 为相对路径，Fanart.tv 为图床绝对地址 */
   file_path: string;
-  /** 缩略预览地址（TMDB 图床绝对地址，展示前需 cachedImageUrl） */
+  /** 缩略预览地址（图床绝对地址，展示前需 cachedImageUrl） */
   preview_url: string;
   width: number | null;
   height: number | null;
@@ -1033,6 +1043,12 @@ export interface ArtworkCandidate {
   language: string | null;
   vote_average: number | null;
   vote_count: number | null;
+  /** 图片来源 */
+  source: "tmdb" | "fanart";
+  /** Fanart.tv 的点赞数（仅 Fanart 图） */
+  likes: number | null;
+  /** 在用但不在本次候选里：只知道路径，语言与热度未知（别显示成「无文字」） */
+  unlisted?: boolean;
 }
 
 /** 「更换图片」能换的三种图：海报 / 背景 / 片名徽标（透明底 PNG）。 */
@@ -1052,6 +1068,11 @@ export interface ArtworkCandidates {
   poster_locked: boolean;
   backdrop_locked: boolean;
   logo_locked: boolean;
+  /**
+   * Fanart.tv 候选的状态：ok=已混入候选 / not_configured=还没填 Key（弹层露出
+   * 「从 Fanart.tv 找更多」入口）/ invalid=Key 已失效 / error=这次没取到 / none=不适用
+   */
+  fanart: "ok" | "not_configured" | "invalid" | "error" | "none";
 }
 
 /** 条目的候选海报/背景/徽标（「更换图片」弹层数据源）。 */
@@ -1400,7 +1421,7 @@ export interface LibraryItemFile {
   missing: boolean;
   /** 生命周期：in_place 在位 / missing 缺失 / trashed 待回收 */
   state: "in_place" | "missing" | "trashed";
-  /** 待回收的预计自动清理时间；null 且 trashed = 做种保护，不自动删 */
+  /** 待回收的预计自动清理时间；null = 不自动删（2026-08-17 之前的旧数据） */
   purge_after: string | null;
   /** 待回收原因（中文整句，含触发方） */
   trash_note: string | null;
@@ -1504,6 +1525,8 @@ export interface LibraryItemDetail {
   douban_id: string | null;
   title: string;
   original_title: string;
+  /** 国际英文名：「搜索资源」与中文名、原名一起搜；老服务端没有该字段 */
+  english_title?: string | null;
   year: number | null;
   poster_url: string | null;
   backdrop_url: string | null;
@@ -1566,6 +1589,9 @@ export interface LibraryEpisode {
 export interface SeasonEpisodes {
   season_number: number;
   episodes: LibraryEpisode[];
+  /** 本季接着看的那一集（同首页「接下来继续」规则），分集区按它锁定集段；本季没播放过、
+   *  分享页（访客没有观看记录）为 null */
+  resume_episode: number | null;
 }
 
 /** 剧集条目一季的分集清单（分集横滚区数据源）。 */
@@ -1606,6 +1632,57 @@ export interface ItemDeleteResult {
   rows_deleted: number;
   freed_bytes: number;
   errors: string[];
+  /** 勾选的删除选项各建了一个后续任务，删除提交后执行（旧服务端没有这个字段） */
+  follow_ups?: DeleteFollowUp[];
+}
+
+export interface DeleteFollowUp {
+  option: string;
+  label: string;
+  job_id: string;
+}
+
+export interface DeletePreviewLine {
+  text: string;
+  tone: "info" | "warn" | "danger";
+}
+
+/** 删除弹窗里的附加选项（别的模块登记的删除参与方，如下载模块的「同时删除下载任务和源文件」）；默认一律不勾 */
+export interface DeleteOption {
+  key: string;
+  label: string;
+  help: string;
+  available: boolean;
+  reason: string | null;
+  lines: DeletePreviewLine[];
+}
+
+/** 删除前预览：媒体库自己的计划 + 附加选项（docs/design/library-boundary.md §3） */
+export interface ItemDeletePreview {
+  whole_item: boolean;
+  plan: ItemDeleteResult;
+  /** 要删的文件里与别处是同一份数据（硬链接）的字节数：只删库文件不会释放这部分空间 */
+  linked_bytes: number;
+  options: DeleteOption[];
+}
+
+export function getDeletePreview(
+  libraryId: number,
+  mediaItemId: number,
+  fileId?: number,
+): Promise<ItemDeletePreview> {
+  const query = fileId != null ? `?file_id=${fileId}` : "";
+  return unwrap(
+    request<ApiEnvelope<ItemDeletePreview>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/delete-preview${query}`,
+    ),
+  );
+}
+
+function optionsQuery(options: string[] | undefined): string {
+  return options && options.length > 0
+    ? `?options=${encodeURIComponent(options.join(","))}`
+    : "";
 }
 
 /** 条目详情：基本信息 + NFO 本地刮削元数据 + 逐文件真实介质规格。 */
@@ -1615,6 +1692,23 @@ export function getLibraryItemDetail(
 ): Promise<LibraryItemDetail> {
   return unwrap(
     request<ApiEnvelope<LibraryItemDetail>>(`/libraries/${libraryId}/items/${mediaItemId}`),
+  );
+}
+
+/**
+ * 条目详情页的相似推荐：只在当前身份可见的同类型库里挑，卡片与首页库行同形。
+ * `excludeSeries`：排除同系列的片（详情页另有完整的系列一行时用）。
+ */
+export function listSimilarItems(
+  libraryId: number,
+  mediaItemId: number,
+  params?: { excludeSeries?: boolean },
+): Promise<LibraryItem[]> {
+  const suffix = params?.excludeSeries ? "?exclude_series=true" : "";
+  return unwrap(
+    request<ApiEnvelope<LibraryItem[]>>(
+      `/libraries/${libraryId}/items/${mediaItemId}/similar${suffix}`,
+    ),
   );
 }
 
@@ -1672,11 +1766,13 @@ export function deleteExternalSubtitle(
 export function deleteLibraryItem(
   libraryId: number,
   mediaItemId: number,
+  options?: string[],
 ): Promise<ItemDeleteResult> {
   return unwrap(
-    request<ApiEnvelope<ItemDeleteResult>>(`/libraries/${libraryId}/items/${mediaItemId}`, {
-      method: "DELETE",
-    }),
+    request<ApiEnvelope<ItemDeleteResult>>(
+      `/libraries/${libraryId}/items/${mediaItemId}${optionsQuery(options)}`,
+      { method: "DELETE" },
+    ),
   );
 }
 
@@ -1699,7 +1795,7 @@ export function restoreLibraryFile(
   );
 }
 
-/** 立即清理待回收的文件（真删磁盘；做种保护形态需先向用户确认断种风险）。 */
+/** 立即清理待回收的文件（真删磁盘；原地待回收的需先向用户确认断种风险）。 */
 export function purgeLibraryFile(
   libraryId: number,
   mediaItemId: number,
@@ -1717,10 +1813,11 @@ export function deleteLibraryFile(
   libraryId: number,
   mediaItemId: number,
   fileId: number,
+  options?: string[],
 ): Promise<ItemDeleteResult> {
   return unwrap(
     request<ApiEnvelope<ItemDeleteResult>>(
-      `/libraries/${libraryId}/items/${mediaItemId}/files/${fileId}`,
+      `/libraries/${libraryId}/items/${mediaItemId}/files/${fileId}${optionsQuery(options)}`,
       { method: "DELETE" },
     ),
   );

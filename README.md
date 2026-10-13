@@ -4,7 +4,7 @@
 
 <p align="center">
   One server replaces your entire media stack.<br>
-  A web app and a native iPhone app included, with an AI agent that actually gets things done.<br>
+  A web app plus native apps for your phone, TV, and Mac, with an AI agent that actually gets things done.<br>
   Everything stays on your own hardware. Free for personal and household use.
 </p>
 
@@ -15,9 +15,11 @@
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
   <a href="https://demo.movieclaw.io">Live Demo</a> ·
+  <a href="https://movieclaw.io/en/download">Download</a> ·
   <a href="#just-say-the-word-it-handles-the-rest">AI Agent</a> ·
   <a href="#boundaries">Boundaries</a> ·
   <a href="#control-it-from-anywhere">CLI</a> ·
+  <a href="https://movieclaw.io/en/docs">Docs</a> ·
   <a href="docs/design/">Design Docs</a> ·
   <a href="#community">Community</a> ·
   <a href="https://github.com/movieclaw/movieclaw/issues">Feedback</a>
@@ -33,7 +35,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/home.jpg" width="900" alt="The MovieClaw library: Continue Watching, favorites, and all your libraries">
+  <img src="docs/images/subscriptions.jpg" width="900" alt="The Subscriptions page in the MovieClaw web app: newly added titles in the carousel, with Just Added below">
 </p>
 
 <p align="center">
@@ -62,8 +64,8 @@ All-in-one has its trade-offs, and they're laid out honestly in [Boundaries](#bo
 
 ## Native apps, with playback that rivals Infuse
 
-Watch right in your browser, or in the native iPhone app. Built on its own playback
-engine: FFmpeg unpacks, Apple plays.
+Watch right in your browser, or in native apps on your phone, TV, and Mac. iPhone, Apple TV,
+and Mac share one playback engine of its own: FFmpeg unpacks, Apple plays.
 
 <p align="center">
   <img src="docs/images/player.jpg" width="900" alt="Landscape playback on iPhone: Liquid Glass controls, audio and subtitle tracks, AirPlay, and live download speed">
@@ -74,19 +76,28 @@ engine: FFmpeg unpacks, Apple plays.
 - Dolby Vision and Dolby Atmos; 4K HDR and Blu-ray disc rips play directly.
 - Hardware decoding first, software decoding as the fallback, and transcoding only as a last resort.
 - 4K over cellular starts in a second or two; when your connection can't keep up with the bitrate, it suggests dropping a quality tier.
-- Progress syncs across the web app, the iPhone app, and Infuse, so you pick up wherever you left off.
+- Progress syncs across the web app, the native apps, and Infuse, so you pick up wherever you left off.
 - **Clips**: swipe vertically through highlights pulled from your own movies and shows.
 
-**Getting the app**: download `MovieClaw-iOS-unsigned.ipa` from
-[Releases](https://github.com/movieclaw/movieclaw/releases) and sideload it with AltStore,
-SideStore, or Sideloadly using your own Apple ID (iOS 26 or later). A public TestFlight is
-coming. Trackers and download clients are configured in the web app.
+**Getting the apps**: apps for iPhone, Android, Apple TV, Android TV, and Mac are all on the
+[download page](https://movieclaw.io/en/download), with versions, system requirements, and
+install steps for each. The iPhone app is on its way to the App Store. Until then, download
+`MovieClaw-iOS-unsigned.ipa` from [Releases](https://github.com/movieclaw/movieclaw/releases)
+and sideload it with AltStore, SideStore, or Sideloadly using your own Apple ID (iOS 26 or
+later; sideloaded builds can't receive push notifications). Trackers and download clients are
+configured in the web app.
+
+Want an email when a new app launches or a new version ships?
+[Get updates](https://movieclaw.io/en/download#updates) on the website. Sign in, pick an
+email address, and unsubscribe anytime.
 
 The web app is liquid glass: the sidebar, inputs, and floating buttons refract whatever
 background image you choose, with a touch of chromatic aberration at the edges. Swap the
 background under **Settings → Appearance**, and it stays consistent on every device
 connected to the same instance.
 
+
+Windows client development is available in [`apps/desktop`](apps/desktop/README.md), using Tauri/WebView2 and bundled mpv. See its build, packaging and validation requirements before distributing a Windows build.
 
 ## Just say the word. It handles the rest.
 
@@ -104,7 +115,7 @@ and Feishu groups can join as a push-only outlet. It checks with you before dele
 anything, and every tool it calls is right there for you to see. The rules are spelled
 out under [Boundaries](#boundaries).
 
-The agent needs an LLM connected under **Settings → AI Models** (any OpenAI-compatible
+The agent needs an LLM connected under **Settings → Model Providers** (any OpenAI-compatible
 endpoint). Skip it and everything else still works. Teach it "skills" in plain Markdown:
 drop a directory with a `SKILL.md` into `data/agent-skills/` (a `description` in the
 frontmatter, instructions in the body, scripts welcome) and the agent loads it on its own
@@ -162,7 +173,7 @@ handful of services.
   <tr>
     <td width="50%" valign="top">
       <img src="docs/images/scene-1.jpg" alt="Continue Watching in the web app, and the same movie on iPhone ready to resume at 10:44">
-      <p><b>8:30 AM, on the train</b>: pick up last night's movie on your phone. In the browser, in the native iPhone app, or in players like Infuse, your progress comes with you.</p>
+      <p><b>8:30 AM, on the train</b>: pick up last night's movie on your phone. In the browser, in the native apps, or in players like Infuse, your progress comes with you.</p>
     </td>
     <td width="50%" valign="top">
       <img src="docs/images/scene-2.jpg" alt="The Subscriptions screen on iPhone, with Coffee Run just added">
@@ -338,8 +349,8 @@ then:
    here.
 3. **Connect your sites**: **Settings → Resource Sites** — paste cookies / API keys, or
    let the browser extension sync them automatically.
-4. Optional: **Settings → AI Models** to hook up an LLM and unlock the assistant;
-   **Settings → Watched Import** to add "source directory → target library" rules, so
+4. Optional: **Settings → Model Providers** to hook up an LLM (then pick a default model under **Settings → AI**)
+   and unlock the assistant; **Settings → Auto-import** to add "source directory → target library" rules, so
    downloads from any source flow into the library too.
 
 > Just want one command to try it out?
@@ -348,7 +359,7 @@ then:
 
 ### Everyday upgrades skip the image pull
 
-From then on, day-to-day upgrades happen in **Settings → App → Version & Updates**:
+From then on, day-to-day upgrades happen in **Settings → Updates & Maintenance**:
 MovieClaw pulls a few-megabyte artifact package from GitHub Releases (mirrors
 configurable), applies it on the `data` volume, and the result survives container
 recreation. If an update misbehaves, roll back on the same page — and a genuinely broken
@@ -412,7 +423,7 @@ irm https://raw.githubusercontent.com/movieclaw/movieclaw/main/scripts/install-c
 Then run `mclaw login` to pair. With no arguments it scans the local network first;
 across subnets or over a VPN, pass the address yourself
 (`mclaw login --server http://192.168.1.10:3000`). The command displays a pairing code —
-verify and approve it in the web UI under **Settings → Members & Devices → Devices**. The
+verify and approve it in the web UI under **Settings → Devices**. The
 token is handed straight back to the process, never printed, so it never ends up in your
 clipboard or shell history.
 
@@ -481,12 +492,15 @@ Change the **left** side of the `ports` colon — e.g. `"8096:3000"` — and bro
 
 Only under `--network host` does the container port become the host port, and only then
 do you actually change the listening port: add `-e MOVIECLAW_WEB_PORT=8096`, or change it
-after setup under **Settings → App → Network & Maintenance** (restarts itself on save).
+after setup under **Settings → Network** (restarts itself on save).
 
 **Host networking has a further trap**: the container's internal frontend (3001) and
-backend (8000) also bind directly on the host. They're not currently configurable, and
-`MOVIECLAW_WEB_PORT` doesn't reach them. If either port is taken, the container exits at
-startup with `EADDRINUSE: address already in use` in `docker logs`. Host mode also
+backend (8000) also bind directly on the host. `MOVIECLAW_WEB_PORT` only changes nginx's
+public port. If 3001 is taken, set `MOVIECLAW_NEXT_PORT=13001` (or another free port) to
+move the internal frontend; the backend still requires port 8000 to be free. With host
+networking, remove `ports` because port mappings are ignored. This frontend port option
+requires a new Docker image: pull the updated image and recreate the container; an
+in-app update cannot replace the entrypoint or nginx template. Host mode also
 listens on UDP 7359 for Jellyfin LAN discovery, which collides with an existing Jellyfin
 or Emby.
 
@@ -499,10 +513,10 @@ the colon and stay off host networking.**
 
 `无法连通 TMDB` ("cannot reach TMDB"), `ConnectTimeout`, `CircuitOpenError`, or
 `CERTIFICATE_VERIFY_FAILED` — whether in the logs or in the connectivity test under
-**Settings → Network & Proxy** — all point to the same problem.
+**Settings → Network** — all point to the same problem.
 
 If your network can't reach `api.themoviedb.org` directly, set a proxy or mirror address
-under **Settings → Network & Proxy** and confirm with the built-in connectivity test. By
+under **Settings → Network** and confirm with the built-in connectivity test. By
 default the proxy covers TMDB, artwork fetches, and GitHub updates, while tracker sites
 stay on direct connections (usually faster that way).
 </details>
@@ -630,28 +644,14 @@ up as well). After a hard crash on bare metal, a quick `ps` check for leftovers 
 Deployment questions, setup tips, feature ideas, or just showing off your library —
 come say hello:
 
-<table>
-  <tr>
-    <td align="center" width="50%" valign="top">
-      <a href="https://t.me/movieclawio"><img src="https://img.shields.io/badge/Telegram-%40movieclawio-26A5E4?logo=telegram&logoColor=white&style=for-the-badge" alt="Telegram group"></a>
-      <br><br>
-      <b>Telegram</b><br>
-      <a href="https://t.me/movieclawio">t.me/movieclawio</a>
-      <br><br>
-      Open to everyone, no invite needed.
-    </td>
-    <td align="center" width="50%" valign="top">
-      <img src="docs/images/wechat-group.jpg" width="240" alt="WeChat group QR code">
-      <br>
-      <b>WeChat group</b><br>
-      Scan with WeChat to join.
-    </td>
-  </tr>
-</table>
-
-WeChat group QR codes expire after a week. If the one above no longer works, the Telegram
-group always does — or [open an issue](https://github.com/movieclaw/movieclaw/issues) and
-we'll refresh it.
+<p align="center">
+  <a href="https://t.me/movieclawio"><img src="https://img.shields.io/badge/Telegram-%40movieclawio-26A5E4?logo=telegram&logoColor=white&style=for-the-badge" alt="Telegram group"></a>
+  <br><br>
+  <b>Telegram</b><br>
+  <a href="https://t.me/movieclawio">t.me/movieclawio</a>
+  <br><br>
+  Open to everyone, no invite needed.
+</p>
 
 ## Docs & Support
 

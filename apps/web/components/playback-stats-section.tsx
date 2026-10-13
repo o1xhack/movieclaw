@@ -14,6 +14,7 @@ import {
   type MediaActivityTarget,
   type PlaybackLogEntry,
 } from "@/lib/api/playback";
+import { deviceLabel } from "@/lib/activity-overview";
 import { formatRuntimeMinutes } from "@/lib/format";
 import { imageUrl } from "@/lib/image-proxy";
 import { formatClockTime, formatTimelineDayLabel, timelineDayKey } from "@/lib/time";
@@ -234,17 +235,18 @@ function HistorySkeleton() {
 
 function HistoryRow({ entry }: { entry: PlaybackLogEntry }) {
   const live = entry.ended_at === null;
-  const device = [entry.client, entry.device_name].filter(Boolean).join(" · ");
+  const device = deviceLabel(entry.client, entry.device_name);
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 max-md:px-3.5">
       <span className="tnum w-11 shrink-0 text-caption text-white/40">
         {formatClockTime(entry.started_at)}
       </span>
-      {/* 28×42 的小图走 poster-card 派生图：一页 30 行若取 w780 原图（设置里选了
+      {/* 28×42 的小图按显示宽取派生图（srcset，1x/2x/3x 都落在 160 档）：一页 30 行若取 w780 原图（设置里选了
           original 就是 MB 级），冷缓存那次要下几 MB 并在主线程同步解码，
           就是「最近播放偶尔打开特别卡」的浏览器侧那一半 */}
       <PosterImage
-        src={entry.media.poster_url ? imageUrl(entry.media.poster_url, "poster-card") : null}
+        src={entry.media.poster_url ? imageUrl(entry.media.poster_url) : null}
+        width={28}
         alt={entry.media.title}
         className="h-[42px] w-[28px] shrink-0 rounded-lg object-cover ring-1 ring-white/10"
       />

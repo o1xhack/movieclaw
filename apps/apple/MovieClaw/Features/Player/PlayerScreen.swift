@@ -99,7 +99,7 @@ struct PlayerScreen: View {
                     for (at, height) in autoQuality {
                         try? await Task.sleep(for: .seconds(max(0, at - elapsed)))
                         elapsed = at
-                        Self.autoTestLog("切画质 \(height == 0 ? "自动" : "\(height)p")")
+                        Self.autoTestLog("切画质 \(height == 0 ? "原画" : "\(height)p")")
                         created.selectQuality(height == 0 ? nil : height)
                     }
                 }
@@ -556,8 +556,9 @@ private struct PlayerContent: View {
                         PlayerUpNextCard(
                             code: "第 \(next.episodeNumber) 集",
                             name: next.name.flatMap { $0.isEmpty ? nil : $0 },
-                            still: controller.scope.api.image(next.stillUrl, .landscapeCard),
+                            still: controller.scope.api.image(next.stillUrl, width: ImageWidth.points(PlayerUpNextCard.stillWidth)),
                             countdown: controller.autoNextArmed ? controller.autoNextProgress : nil,
+                            stillWatching: controller.asksStillWatching,
                             dismiss: {
                                 controller.noteUserActivity()
                                 controller.nextDismissed = true

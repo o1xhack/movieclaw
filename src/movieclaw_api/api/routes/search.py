@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -34,6 +35,7 @@ from movieclaw_api.schemas.search import (
 from movieclaw_api.services.auth import Principal
 from movieclaw_api.services.site_catalog import SiteCatalogService
 from movieclaw_api.services.site_search import (
+    also_keywords_of,
     search_all_sites,
     stream_search_all_sites,
 )
@@ -71,6 +73,13 @@ async def search_torrents(
         "",
         description="搜索关键词，支持 IMDb ID；留空 = 浏览模式，改拉各站种子列表页",
     ),
+    also_keywords: list[str] | None = Query(
+        None,
+        description=(
+            "同搜词（可多值，如片名的英文名/原名）：每站与 keyword 一起搜、按种子合并结果；"
+            "去重后连同 keyword 至多 3 个，浏览模式忽略"
+        ),
+    ),
     categories: list[TorrentCategory] | None = Query(
         None, description="分类组合过滤（可多值：categories=movie&categories=tv）；不传表示不限分类"
     ),
@@ -99,8 +108,10 @@ async def search_torrents(
     （站点自身的浏览页排序，通常是最新发布在前），响应结构与搜索完全一致。
     """
     keyword = keyword.strip()
+    also = also_keywords_of(keyword, also_keywords)
     result = await search_all_sites(
         keyword=keyword,
+        also_keywords=also,
         categories=categories,
         site_ids=sites,
         label=label,
@@ -119,6 +130,7 @@ async def search_torrents(
             page,
             poster_mode,
             member_id=_history_owner(principal),
+            also_keywords=also,
         )
         if history_id is not None:
             await _save_snapshot(history_id, result.items, result.sites, result.total)
@@ -134,6 +146,7 @@ async def _record_history(
     page: int,
     poster_mode: bool = False,
     member_id: int = 0,
+    also_keywords: list[str] | None = None,
 ) -> int | None:
     """只在第 1 页记录搜索历史：翻页是同一次搜索的延续，不该重复计数。
 
@@ -151,6 +164,7 @@ async def _record_history(
             site_ids=sites,
             poster_mode=poster_mode,
             member_id=member_id,
+            also_keywords=also_keywords,
         )
     except Exception:  # noqa: BLE001 —— 历史写入失败不能拖垮搜索本身
         logger.warning("搜索历史写入失败（不影响本次搜索结果）", exc_info=True)
@@ -200,6 +214,13 @@ async def search_torrents_stream(
         "",
         description="搜索关键词，支持 IMDb ID；留空 = 浏览模式，改拉各站种子列表页",
     ),
+    also_keywords: list[str] | None = Query(
+        None,
+        description=(
+            "同搜词（可多值，如片名的英文名/原名）：每站与 keyword 一起搜、按种子合并结果；"
+            "去重后连同 keyword 至多 3 个，浏览模式忽略"
+        ),
+    ),
     categories: list[TorrentCategory] | None = Query(
         None, description="分类组合过滤（可多值）；不传表示不限分类"
     ),
@@ -228,6 +249,7 @@ async def search_torrents_stream(
     ``keyword`` 留空即浏览模式（按分类拉各站种子列表页），语义与阻塞版一致。
     """
     keyword = keyword.strip()
+    also = also_keywords_of(keyword, also_keywords)
     # 历史在流开始前落库：流式响应返回后请求级 session 的生命周期不再可靠；
     # 站点白名单同理（流式生成器运行时请求级 session 已不可用）
     allowed = await usable_site_ids(session, principal)
@@ -243,6 +265,7 @@ async def search_torrents_stream(
             page,
             poster_mode,
             member_id=_history_owner(principal),
+            also_keywords=also,
         )
 
     async def event_source():
@@ -252,6 +275,7 @@ async def search_torrents_stream(
         done: SearchStreamDone | None = None
         async for event, payload in stream_search_all_sites(
             keyword=keyword,
+            also_keywords=also,
             categories=categories,
             site_ids=sites,
             label=label,
@@ -392,12 +416,17 @@ async def update_search_presets(
 )
 async def list_search_history(
     limit: int = Query(10, ge=1, le=50, description="返回关键词组数上限"),
+    vertical: Literal["titles", "torrents"] | None = Query(
+        None, description="搜索类型；指定后仅在该类型内获取最近关键词组"
+    ),
     principal: Principal = Depends(require_login),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[list[SearchHistoryItem]]:
-    """返回**本人**最近的关键词组；组内保留媒体及各资源分类的独立记录与快照。"""
+    """返回本人指定类型的最近关键词组；省略类型时兼容原有混合列表。"""
     rows = await SearchHistoryRepository(session).list_recent_groups(
-        limit, member_id=_history_owner(principal)
+        limit,
+        member_id=_history_owner(principal),
+        vertical={"titles": "media", "torrents": "torrent"}.get(vertical),
     )
     return ok([SearchHistoryItem.from_model(r) for r in rows])
 
@@ -434,6 +463,7 @@ async def get_search_history_results(
             TorrentSearchHistoryResultsView(
                 history_id=row.id,
                 keyword=row.keyword,
+                also_keywords=repo.parse_snapshot(row.also_keywords_json) or None,
                 label=row.label,
                 categories=repo.parse_snapshot(row.categories_json),
                 site_ids=repo.parse_snapshot(row.site_ids_json),
@@ -486,8 +516,14 @@ async def delete_search_history(
     openapi_extra={"x-cli-dangerous": "confirm"},
 )
 async def clear_search_history(
+    vertical: Literal["titles", "torrents"] | None = Query(
+        None, description="仅清空指定搜索类型；省略时清空本人全部搜索历史"
+    ),
     principal: Principal = Depends(require_login),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[None]:
-    count = await SearchHistoryRepository(session).clear(member_id=_history_owner(principal))
+    count = await SearchHistoryRepository(session).clear(
+        member_id=_history_owner(principal),
+        vertical={"titles": "media", "torrents": "torrent"}.get(vertical),
+    )
     return ok(None, message=f"已清空 {count} 条搜索历史")

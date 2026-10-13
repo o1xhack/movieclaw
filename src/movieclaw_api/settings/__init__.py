@@ -30,13 +30,12 @@ from movieclaw_api.settings.base import (
     list_descriptors,
     register_setting,
 )
-from movieclaw_api.settings.channel_push import (
-    ChannelPushSetting,
-)
+from movieclaw_api.settings.cloud import CloudSetting, PushChannelsSetting
 from movieclaw_api.settings.llm import LlmDefaultsSetting
 from movieclaw_api.settings.mcp import McpEndpoint, McpEndpointsSetting
 from movieclaw_api.settings.metadata import (
     DiscoverPreferencesSetting,
+    FanartSetting,
     MetadataScrapeSetting,
 )
 from movieclaw_api.settings.network import (
@@ -60,6 +59,7 @@ from movieclaw_api.settings.schemas import (
     mark_initialized,
     revoke_sync_token,
 )
+from movieclaw_api.settings.smart_subscription import SmartAutomationSettings
 from movieclaw_api.settings.store import (
     SettingStore,
     get_setting_store,
@@ -74,6 +74,7 @@ from movieclaw_api.settings.webhook import (
 )
 
 __all__ = [
+    "SmartAutomationSettings",
     # 基类与注册表
     "SettingSchema",
     "SettingDescriptor",
@@ -91,7 +92,7 @@ __all__ = [
     "SystemBootstrap",
     "is_initialized",
     "mark_initialized",
-    # 浏览器插件同步令牌
+    # 浏览器扩展同步令牌
     "ExtensionSyncSetting",
     "get_sync_setting",
     "generate_sync_token",
@@ -101,6 +102,7 @@ __all__ = [
     "AdminAccountSetting",
     "SessionSecretSetting",
     # 刮削与发现页偏好
+    "FanartSetting",
     "MetadataScrapeSetting",
     "DiscoverPreferencesSetting",
     # 网络与代理
@@ -109,7 +111,9 @@ __all__ = [
     "RemoteTranscodeSetting",
     "DEFAULT_REMOTE_TRANSCODE_MAX_ARTIFACT_BYTES",
     "MAX_REMOTE_TRANSCODE_ARTIFACT_BYTES",
-    "ChannelPushSetting",
+    # MovieClaw Cloud 与 App 推送通道
+    "CloudSetting",
+    "PushChannelsSetting",
     "BUILTIN_EGRESS_SERVICES",
     # AI 设定（各用途默认模型）
     "LlmDefaultsSetting",

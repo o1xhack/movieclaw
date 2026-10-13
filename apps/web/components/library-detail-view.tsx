@@ -124,7 +124,7 @@ import {
   type WallSortPref,
 } from "@/lib/wall-sort";
 import { formatRelativeTime } from "@/lib/time";
-import { cachedImageUrl } from "@/lib/image-proxy";
+import { imageUrl, responsiveImage } from "@/lib/image-proxy";
 import { keepIfEqual, reconcileList } from "@/lib/poll-reconcile";
 import { usePermissions } from "@/lib/permissions";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
@@ -311,7 +311,7 @@ export function LibraryDetailView({ libraryId }: { libraryId: number }) {
   // 影视库 / 其他库的图床浏览模式（video-gallery.tsx）：海报墙换成每部作品的
   // 海报 / 剧照 / 章节图瀑布流，点开灯箱能直接播放或进详情。偏好记在浏览器里；
   // 图片库本身就是相册墙，这个开关对它没有意义
-  const [galleryPreferred, setGalleryMode] = useVideoGalleryMode();
+  const [galleryPreferred, setGalleryMode] = useVideoGalleryMode(libraryId);
   // 两种墙的锚点属性不同：海报墙一格一个条目（data-library-item-id），图廊一部
   // 作品十几张图，得按瓦片认（data-gallery-tile-id）。两者不会同时在 DOM 里
   const restoreScrollRef = useScrollRestoration(`library:${libraryId}`, {
@@ -3200,7 +3200,7 @@ function ReviewGroupRow({ group, onChanged }: { group: ReviewGroup; onChanged: (
     <div className="flex min-w-0 flex-1 items-center gap-2.5">
       {info.poster_url ? (
         <img
-          src={cachedImageUrl(info.poster_url)}
+          {...responsiveImage(imageUrl(info.poster_url), 36)}
           alt=""
           loading="lazy"
           decoding="async"

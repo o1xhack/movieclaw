@@ -13,6 +13,8 @@ import {
   DENSITY,
   layoutMasonry,
   layoutSparseRow,
+  tileImageWidth,
+  usePhotoWallDensity,
   useTileWindow,
   type DensitySpec,
   type PhotoWallDensity,
@@ -25,7 +27,7 @@ import {
   type ZoomLightboxSlide,
 } from "@/components/zoom-lightbox";
 import type { LibraryGalleryGroup, LibraryGalleryImage } from "@/lib/api/libraries";
-import { imageUrl } from "@/lib/image-proxy";
+import { fullScreenImageWidth, imageUrl } from "@/lib/image-proxy";
 import { playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
 
 /**
@@ -64,18 +66,20 @@ const GROUPED_STORAGE_KEY = "movieclaw.library.gallery-grouped";
  * 直接在 useState 初始值里读会导致首屏与水合后不一致。
  */
 function useStoredFlag(key: string, fallback: boolean): [boolean, (next: boolean) => void] {
-  const [value, setValue] = useState(fallback);
+  const [storedValue, setStoredValue] = useState({ key, value: fallback });
   useEffect(() => {
+    let value = fallback;
     try {
       const stored = window.localStorage.getItem(key);
-      if (stored !== null) setValue(stored === "1");
+      if (stored !== null) value = stored === "1";
     } catch {
       /* 隐私模式等拿不到 storage：保持默认值 */
     }
-  }, [key]);
+    setStoredValue({ key, value });
+  }, [key, fallback]);
   const update = useCallback(
     (next: boolean) => {
-      setValue(next);
+      setStoredValue({ key, value: next });
       try {
         window.localStorage.setItem(key, next ? "1" : "0");
       } catch {
@@ -84,12 +88,12 @@ function useStoredFlag(key: string, fallback: boolean): [boolean, (next: boolean
     },
     [key],
   );
-  return [value, update];
+  return [storedValue.key === key ? storedValue.value : fallback, update];
 }
 
-/** 读写「图床浏览模式」偏好：进详情再退回来还在图廊 */
-export function useVideoGalleryMode(): [boolean, (next: boolean) => void] {
-  return useStoredFlag(MODE_STORAGE_KEY, false);
+/** 按媒体库记住模式；跨库页面保留自己的偏好，不作为新库的默认值。 */
+export function useVideoGalleryMode(libraryId: number | null = null): [boolean, (next: boolean) => void] {
+  return useStoredFlag(libraryId === null ? MODE_STORAGE_KEY : `${MODE_STORAGE_KEY}:${libraryId}`, false);
 }
 
 /** 读写「按作品分组」偏好：默认分组，关掉就是整库一条瀑布流 */
@@ -430,10 +434,10 @@ const GalleryTile = memo(function GalleryTile({
     >
       {/* 图廊的图比海报大得多（剧照 w1280、本地资产是原件），滑过去经常要等上
           一会儿；开脉冲占位，等待期看着是"在加载"而不是一块黑。
-          取图一律走派生：相册墙的宽松密度（spec.variant 为 undefined）直接吃原图，
-          那是因为图片库的墙图本来就是 720 缩略图——图廊没这层，得自己要一张 */}
+          取图按密度档的显示宽 × 屏幕倍率带 w（与相册墙同一口径，见 DensitySpec.imageWidth），
+          灯箱缩略条取同一个地址；比密度档还宽的瓦片按瓦片自身宽度取 */}
       <PosterImage
-        src={imageUrl(image.url, spec.variant ?? "gallery-tile")}
+        src={imageUrl(image.url, { width: tileImageWidth(spec.imageWidth, width) })}
         alt={`${group.title} · ${image.label}`}
         pulseWhileLoading
         preload
@@ -495,19 +499,21 @@ export function VideoGalleryLightbox({
 }) {
   const router = useRouter();
   const entry = entries[index];
+  // 墙上的那张先铺底（与墙同一密度档、同一个地址，命中缓存），主图按屏宽像素取
+  // （等比装下整屏，打开时定格）：本地资产现在是原图，不带 w 就是整张 4K 原件
+  const [density] = usePhotoWallDensity();
+  const thumbWidth = tileImageWidth(DENSITY[density].imageWidth);
+  const [stageWidth] = useState(fullScreenImageWidth);
   const slides = useMemo<ZoomLightboxSlide[]>(
     () =>
       entries.map(({ group, image }, i) => ({
         key: i,
         title: `${groupTitle(group)} · ${image.label}`,
-        // 墙上的派生图先铺底，主图走屏幕适配派生（长边 2048，不放大）：源本身
-        // 就没有比 w1280 剧照 / 本地资产更高一级的原图，这一层不为缩小尺寸，
-        // 而是转成 WebP——同样的画质少三到五成字节，翻页跟手（图片库灯箱同款口径）
-        thumbUrl: imageUrl(image.url, "photo-tile"),
-        screenUrl: imageUrl(image.url, "photo-screen"),
+        thumbUrl: imageUrl(image.url, { width: thumbWidth }),
+        screenUrl: imageUrl(image.url, { width: stageWidth }),
         aspect: image.aspect,
       })),
-    [entries],
+    [entries, thumbWidth, stageWidth],
   );
 
   /** 播放：章节图从那一帧起播，分集剧照播那一集，海报 / 剧照从头（或续播） */

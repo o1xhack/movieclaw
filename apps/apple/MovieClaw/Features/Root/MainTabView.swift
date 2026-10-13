@@ -45,6 +45,10 @@ struct MainTabView: View {
     @State private var switchingAccount = false
     /// 标签栏上方的「接着看」条（见 ResumeAccessory）
     @State private var resume = ResumeBarStore()
+    /// 「我的」页 AI 一行输入框的草稿与打字状态（见 AgentQuickBar）
+    @State private var quickDraft = AgentQuickDraft()
+    /// 点开的推送通知（见 openPushTarget）
+    @Environment(PushCenter.self) private var push
 
     /// 当前停在「片段」页（媒体库页签栈顶）
     private var onReels: Bool {
@@ -59,15 +63,20 @@ struct MainTabView: View {
         }
     }
 
+    /// 停在「我的」页签（根页或它下面的设置、个人信息等子页面）：管理员的标签栏附件是 AI 一行输入框（AgentQuickBar），
+    /// 不是「接着看」（2026-10-13 用户要求子页面也一样）。AI 会话页自己有输入框，不算
+    private var onMoreTab: Bool {
+        router.selectedTab == .more && !onAgentSession
+    }
+
     var body: some View {
         let session = model.session
         let permissions = session.map(Permissions.init(session:)) ?? .none
         let api = model.api ?? EnvironmentValues().api
+        let quickBar = onMoreTab && permissions.isAdmin ? quickDraft : nil
 
         TabView(selection: Binding(get: { router.selectedTab }, set: { tab in
-            // 再点一次当前页签：回到这个页签的根页（iOS 惯例）。「片段」这类不带返回键的二级页靠它回去
-            if tab == router.selectedTab { router.popToRoot() }
-            router.selectedTab = tab
+            router.selectTab(tab)
         })) {
             Tab(value: MainTab.library) {
                 TabRoot(tab: .library) { LibraryHomeView() }
@@ -99,6 +108,12 @@ struct MainTabView: View {
             }
             Tab(value: MainTab.more) {
                 TabRoot(tab: .more) { MorePage() }
+                    // 打字时接替附件的真输入框挂在整个「我的」导航栈上：根页和子页面都在附件原来的位置接替；
+                    // 往下拖收键盘（同「信息」）也对整个栈生效，子页面里才收得掉键盘
+                    .scrollDismissesKeyboard(.interactively)
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if quickDraft.editing, permissions.isAdmin { AgentQuickInput(quick: quickDraft) }
+                    }
             } label: {
                 Label {
                     Text(MainTab.more.title)
@@ -110,11 +125,14 @@ struct MainTabView: View {
             .accessibilityLabel(MainTab.more.title)
             .accessibilityIdentifier("open-more")
         }
-        // 「片段」上下滑动是在换条，不是在往下读：停在它上面时标签栏不收起（docs/design/reels.md）
-        .tabBarMinimizeBehavior(onReels ? .never : .onScrollDown)
-        // 「接着看」条：片段页自己占满底部、AI 会话页底部是输入框（2026-09-30 用户反馈条贴在输入框下面很怪），都不显示
+        // 「片段」上下滑动是在换条，不是在往下读：停在它上面时标签栏不收起（docs/design/reels.md）；
+        // 「我的」页正在用一行输入框打字时也不收：往下拖收键盘会被当成一次下滑把标签栏收起，
+        // 打字的输入框落回展开的位置、附件却换回到收起的那一行，跳一下（见 AgentQuickBar）
+        .tabBarMinimizeBehavior(onReels || quickDraft.editing ? .never : .onScrollDown)
+        // 「接着看」条：片段页自己占满底部、AI 会话页底部是输入框（2026-09-30 用户反馈条贴在输入框下面很怪），都不显示；
+        // 「我的」根页这个位置是 AI 一行输入框
         .modifier(ResumeAccessoryModifier(item: resume.visibleItem, enabled: !onReels && !onAgentSession,
-                                          onHide: { resume.hide() }))
+                                          quickBar: quickBar, onHide: { resume.hide() }))
         // 进主界面、关掉播放器（看过就变了）、回到前台、换账号时重新取最近播放的那一条
         .task(id: "\(router.player == nil)|\(scenePhase == .active)|\(session?.nickname ?? "")|\(api.server.origin)") {
             guard router.player == nil, scenePhase == .active else { return }
@@ -154,7 +172,7 @@ struct MainTabView: View {
             // 冷启动先让第一帧上屏（这时页签先用 SF Symbol 顶着），再画头像（见 FirstFrameGate）
             await FirstFrameGate.wait()
             avatarIcon = AvatarTabIcon.render(nickname: session?.nickname, photo: nil, scale: displayScale)
-            guard let url = api.image(session?.avatarUrl) else { return }
+            guard let url = api.image(session?.avatarUrl, width: ImageWidth.points(AvatarTabIcon.size)) else { return }
             let request = ImageRequest(url: url, processors: [.resize(size: CGSize(width: AvatarTabIcon.size, height: AvatarTabIcon.size), contentMode: .aspectFill)])
             guard let photo = try? await ImagePipeline.shared.image(for: request) else { return }
             avatarIcon = AvatarTabIcon.render(nickname: session?.nickname, photo: photo, scale: displayScale)
@@ -164,6 +182,9 @@ struct MainTabView: View {
         }
         .fullScreenCover(item: $router.player) { request in
             PlayerScreen(request: request)
+        }
+        .fullScreenCover(item: $router.deviceApproval) { launch in
+            DeviceApprovalFlow(launch: launch)
         }
         .onAppear {
             #if DEBUG
@@ -249,6 +270,13 @@ struct MainTabView: View {
             // 退出 / 移除当前账号后自动换到了下一个账号：这里才弹得出提示（见 AppModel.pendingNotice）
             if let notice = model.takeNotice() { feedback.success(notice) }
         }
+        .onChange(of: push.pendingTap, initial: true) { _, target in
+            openPushTarget(target, permissions: permissions)
+        }
+        .onChange(of: router.player == nil) { _, closed in
+            // 播放时点开了别的账号的通知：播放器关掉后接着处理
+            if closed { openPushTarget(push.pendingTap, permissions: permissions) }
+        }
         .onAppear { if scenePhase == .active { wasActive = true } }
         .onDisappear {
             // 会话过期被打回登录页：记下此刻的位置，重新登录后回到这里（Web 401 → /login?next=原路径）
@@ -323,6 +351,7 @@ struct MainTabView: View {
         // 预热中切了页签：马上拆掉预热的那份，不和真正要显示的页面抢主线程
         .onChange(of: router.selectedTab) { if !warmupTabs.isEmpty { warmupTabs = [] } }
         .environment(router)
+        .environment(quickDraft)
         .environment(feedback)
         .environment(badges)
         .environment(\.api, api)
@@ -360,6 +389,39 @@ extension MainTabView {
             router.present(.accountSwitcher)
         } catch {
             feedback.error(error)
+        }
+    }
+
+    /// 点开推送通知（docs/design/cloud-push.md §9）：来自当前账号就按 `open` 打开站内路径；来自本机别的账号
+    /// 先切过去——主界面按账号整棵重建，新的主界面接着处理同一条（`pendingTap` 这时还留着）
+    private func openPushTarget(_ target: PushTapTarget?, permissions: Permissions) {
+        guard let target, let server = model.server, let session = model.session else { return }
+        if target.login.login == PushLogin(server: server, username: session.username) {
+            push.pendingTap = nil
+            guard let path = target.openPath else { return }
+            router.permissions = permissions // 冷启动时可能抢在 onChange 同步权限之前
+            router.open(webPath: path)
+            return
+        }
+        guard let address = target.login.server else {
+            push.pendingTap = nil
+            return
+        }
+        // 正在播放时不切账号（切账号会把主界面连同播放器整个重建）：留着，关掉播放器后再切
+        guard router.player == nil, !switchingAccount else { return }
+        switchingAccount = true
+        Task {
+            defer { switchingAccount = false }
+            do {
+                try await model.switchAccount(to: target.login.username, on: address)
+            } catch AppModel.AccountError.needsPassword {
+                push.pendingTap = nil
+                feedback.error("「\(target.login.accountName)」的登录已失效，点它重新输入密码")
+                router.present(.accountSwitcher)
+            } catch {
+                push.pendingTap = nil
+                feedback.error(error)
+            }
         }
     }
 
@@ -495,8 +557,11 @@ enum TabIcon {
 ///
 /// 页面自己的按钮用 `.toolbar` 追加（发现页的筛选、媒体库的 ⋯ 菜单）。
 /// 外层注入的 `.topBarTrailing` 会排到页面按钮前面，所以放 `.primaryAction`（固定在最右），
-/// 再用固定间隔隔开：页面按钮在左边自成一组，搜索是独立圆钮。例外是媒体库：「▶ 片段」作为本页主操作
-/// 也放 `.primaryAction`，排在搜索右边（2026-09-30 用户拍板「⋯ · 搜索 · ▶ 片段」）。
+/// 再用固定间隔隔开：页面按钮在左边自成一组，搜索是独立圆钮。
+/// 媒体库例外：「▶ ⋯ 搜索」三个合成一组，不加间隔（2026-10-13 用户要求试试）。
+///
+/// 「我的」页只保留扫码钮：
+/// 扫电视 / 终端上的登录二维码 → 直达独立的批准页（DeviceApprovalView）。
 struct AppTopBar: ViewModifier {
     let tab: MainTab
     @Environment(Router.self) private var router
@@ -504,9 +569,22 @@ struct AppTopBar: ViewModifier {
 
     func body(content: Content) -> some View {
         content.toolbar {
-            // 任一搜索分区可用就给入口（影视 / 资源 / 媒体库，见 SearchAccess.canOpenSearch）
-            if searchAccess.canOpenSearch {
+            if tab == .more || (searchAccess.canOpenSearch && tab != .library) {
                 ToolbarSpacer(.fixed, placement: .primaryAction)
+            }
+            if tab == .more {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        router.deviceApproval = DeviceApprovalLaunch(scanFirst: true)
+                    } label: {
+                        Image(systemName: "qrcode.viewfinder")
+                    }
+                    .accessibilityLabel("扫码批准设备登录")
+                    .accessibilityIdentifier("open-scanner")
+                }
+            }
+            // 任一搜索分区可用就给入口（影视 / 资源 / 媒体库，见 SearchAccess.canOpenSearch）
+            if tab != .more, searchAccess.canOpenSearch {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
                         router.push(.searchHome(mode: preferredSearchMode))
@@ -546,7 +624,7 @@ struct AvatarBadge: View {
     @Environment(\.api) private var api
 
     var body: some View {
-        let url = api.image(avatarUrl ?? session?.avatarUrl)
+        let url = api.image(avatarUrl ?? session?.avatarUrl, width: ImageWidth.points(size))
         ZStack {
             Circle().fill(LinearGradient(colors: [Theme.accentStrong, Theme.accent2], startPoint: .top, endPoint: .bottom))
             Text(initials)

@@ -21,7 +21,8 @@ import re
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from movieclaw_api.services.library.layout import IMAGE_EXTS
@@ -80,6 +81,10 @@ class MediaSpec:
     bit_rate: int | None
     frame_rate: float | None = None
     color_space: str | None = None
+    #: 杜比视界的 profile（5 / 7 / 8 …）与基础层能否直接解读（P8 / P7 带 HDR10 / SDR 基础层为 True，
+    #: P5 的 IPT-PQ-c2 基础层为 False）；不是杜比视界、或容器里没有 DOVI 配置记录时 None
+    dv_profile: int | None = None
+    dv_bl_compatible: bool | None = None
     audio_streams: list[dict] = field(default_factory=list)
     subtitle_streams: list[dict] = field(default_factory=list)
     # 容器级内容日期标签（本地来源条目的"内容时间"来源，docs/design/
@@ -92,14 +97,20 @@ class MediaSpec:
     # 元素 {"start_ms", "end_ms", "title"}，结构见 ``_chapter_info``；有效章节
     # （内嵌不足两个时按时长合成）由 library/chapters.py 决定，这里只记事实
     chapters: list[dict] = field(default_factory=list)
+    #: ffprobe 认出的封装格式（``format_name``，如 ``matroska,webm``）。本地文件的容器
+    #: 按扩展名记，用不上它；网盘直链的地址常常看不出扩展名，靠它定容器
+    format_name: str | None = None
 
 
-def probe_media(path: str | Path) -> MediaSpec | None:
+def probe_media(path: str | Path, *, input_args: Sequence[str] = ()) -> MediaSpec | None:
     """探测单个媒体文件；ffprobe 缺失或探测失败返回 None（调用方规格置 NULL）。
 
     图片文件（扩展名在 ``IMAGE_EXTS``）分派给 ``probe_image``：不起 ffprobe
     子进程，用 Pillow 只读文件头。两者返回**同一个** ``MediaSpec``，下游的
     入账、内容时间回落、预取、失败记忆、退避补探全部不用区分。
+
+    ``input_args`` 放在输入前（探测网盘直链时的协议白名单与断线续读，见
+    ``streaming.strm_input_args``）。
     """
     global _missing_warned
     if Path(path).suffix.lower() in IMAGE_EXTS:
@@ -117,6 +128,7 @@ def probe_media(path: str | Path) -> MediaSpec | None:
                 # 章节顺带一起读（docs/design/video-chapters.md §4.5）：章节在
                 # 容器头里，与流信息同一次读取，零额外 IO
                 "-show_chapters",
+                *input_args,
                 str(path),
             ],
             capture_output=True,
@@ -142,7 +154,25 @@ def probe_media(path: str | Path) -> MediaSpec | None:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return None
-    return _parse_probe(payload, include_mpegts_pids=Path(path).suffix.lower() == ".m2ts")
+    spec = _parse_probe(payload, include_mpegts_pids=Path(path).suffix.lower() == ".m2ts")
+    if Path(path).suffix.lower() == ".iso":
+        spec = _with_disc_image_duration(spec, path)
+    return spec
+
+
+def _with_disc_image_duration(spec: MediaSpec, path: str | Path) -> MediaSpec:
+    """光盘镜像的片长换成盘内正片的时长（蓝光主播放列表 / DVD 正片节目链）。
+
+    ffprobe 对整个镜像估的片长常常离谱（NAS 实测一集 DVD 记成 4 秒、一部蓝光多出一小时），
+    「继续观看」的进度、片长显示都按台账算。读不出盘内结构就保留 ffprobe 的值。
+    """
+    # 延迟导入：播放源模块依赖面大，探测模块保持轻量
+    from movieclaw_api.services.playback.iso_source import iso_disc_source
+
+    source = iso_disc_source(path)
+    if source is None or source.duration_s <= 0:
+        return spec
+    return replace(spec, duration_seconds=round(source.duration_s))
 
 
 
@@ -428,7 +458,9 @@ def probe_keyframe_interval(path: str | Path, duration_seconds: int | None) -> f
     if cached is not None:
         return cached
     value = _index_keyframe_interval(path, duration_seconds)
-    if value is None:
+    if value is None and path.suffix.lower() != ".strm":
+        # 网盘直链不做码流采样：三段各 30 秒的码流要从网盘现拉，4K 片是几百 MB、
+        # 起播前白等十几秒。读不出索引（Matroska Cues）就按未知处理——不换封装、改转码
         value = _probe_keyframe_interval(str(path), duration_seconds)
     if value is not None:
         if len(_keyframe_cache) >= _KEYFRAME_CACHE_MAX:
@@ -450,7 +482,7 @@ def _index_keyframe_interval(path: Path, duration_seconds: int | None) -> float 
     （残缺的 Cues 说明不了全片），平均间隔要在直通门槛以内——Cues 只可能比
     实际关键帧稀（有的封装器每隔几秒才记一个），稀了就老老实实采样核实。
     """
-    if path.suffix.lower() not in {".mkv", ".webm", ".mp4", ".m4v", ".mov"}:
+    if path.suffix.lower() not in {".mkv", ".webm", ".mp4", ".m4v", ".mov", ".strm"}:
         return None
     index = read_keyframe_index(path, allow_ffprobe=False)
     if index is None or len(index.times_s) < 2:
@@ -636,11 +668,16 @@ def _parse_probe(payload: dict, *, include_mpegts_pids: bool = False) -> MediaSp
     codec = None
     hdr = None
     bit_depth = None
+    dv_profile: int | None = None
+    dv_bl_compatible: bool | None = None
     if video is not None:
         codec = video.get("codec_name")
         resolution = _resolution_label(video.get("width"), video.get("height"))
         hdr = _hdr_label(video)
         bit_depth = _bit_depth(video)
+        dv_profile, compatible = _dv_info(video)
+        if dv_profile is not None:
+            dv_bl_compatible = compatible
 
     streams = payload.get("streams", [])
     fmt_tags = {str(k).lower(): v for k, v in (fmt.get("tags") or {}).items()}
@@ -657,6 +694,8 @@ def _parse_probe(payload: dict, *, include_mpegts_pids: bool = False) -> MediaSp
             else None
         ),
         color_space=_color_space_label(video) if video else None,
+        dv_profile=dv_profile,
+        dv_bl_compatible=dv_bl_compatible,
         audio_streams=[
             _audio_stream_info(s, include_pid=include_mpegts_pids)
             for s in streams
@@ -670,6 +709,7 @@ def _parse_probe(payload: dict, *, include_mpegts_pids: bool = False) -> MediaSp
         tag_date=_first_tag(fmt_tags, "date", "originaldate", "date_released"),
         creation_time=_first_tag(fmt_tags, "creation_time", "com.apple.quicktime.creationdate"),
         chapters=parse_chapters(payload.get("chapters")),
+        format_name=fmt.get("format_name") or None,
     )
 
 

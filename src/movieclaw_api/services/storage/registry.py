@@ -119,6 +119,22 @@ def _orphans_by_id(model_name: str) -> EntryProbe:
     return probe
 
 
+async def _unused_profile_tiers(entries: list[Path]) -> set[Path]:
+    """头像目录第一层是档位（original / h632 / …）：全局与各库覆盖都不用的档位整层算孤儿。"""
+    from sqlmodel import select
+
+    from movieclaw_api.services.scrape_config import effective_profile_size, merge_for_library
+    from movieclaw_db.engine import get_database
+    from movieclaw_db.models import Library
+
+    async with get_database().session() as session:
+        libraries = (await session.execute(select(Library))).scalars().all()
+    in_use = {effective_profile_size()} | {
+        effective_profile_size(merge_for_library(library)) for library in libraries
+    }
+    return {e for e in entries if e.is_dir() and e.name not in in_use}
+
+
 async def _staging_dirs(entries: list[Path]) -> set[Path]:
     """生成到一半的 staging（``.<name>.<uuid>.part``）：正在写，不能碰。"""
     return {e for e in entries if e.name.endswith(".part")}
@@ -217,6 +233,7 @@ DATA_DIRS: tuple[DataDir, ...] = (
             "（一集约 33 KB），同一季的指纹互相比对就能认出片头片尾。清空后已经认出的片头片尾"
             "不受影响，播放照常给「跳过片头」；但之后这一季再来新集时，要把旧集重新读一遍"
             "（每集约 6 秒、几百 MB 的读取），所以只建议在磁盘紧张时清理。"
+            "这里还存着片尾几帧画面的文字识别结果（用来核对演职员表），清掉后重新识别时补抽。"
         ),
         default="data/cache/audio-fingerprints",
         resolve=lambda s: Path(s.audio_fingerprint_dir),
@@ -225,6 +242,23 @@ DATA_DIRS: tuple[DataDir, ...] = (
         clearable=True,
         orphans=_orphans_by_id("LibraryFile"),
         busy=_staging_dirs,
+    ),
+    DataDir(
+        key="cache.reels-clips",
+        title="预切片段",
+        summary="预告与刷片放的 1080p 小片段",
+        description=(
+            "开了「设置 → 播放 → 片段预切」后，后台为每部片挑好的那一段切成的 1080p 小文件，"
+            "电视大图预告与刷片直接放它，一段十几到二十几 MB。清空后预告先显示剧照、"
+            "刷片暂时没有可刷的；开关开着时后台会重新切"
+            "（全库要在空闲时跑很久，有人观看时自动暂停）。"
+        ),
+        default="data/cache/reels-clips",
+        resolve=lambda s: Path(s.reels_clips_dir),
+        group=Group.CACHE,
+        rebuild_cost=RebuildCost.EXPENSIVE,
+        clearable=True,
+        orphans=_orphans_by_id("LibraryFile"),
     ),
     DataDir(
         key="cache.reels",
@@ -336,6 +370,22 @@ DATA_DIRS: tuple[DataDir, ...] = (
         clearable=False,
         orphans=_orphans_by_id("MediaItem"),
     ),
+    DataDir(
+        key="metadata.people",
+        title="演职员头像",
+        summary="刮削下载的演员与导演头像（同一个人只存一份）",
+        description=(
+            "详情页、影人页、Jellyfin 人物图用的演职员头像，按 TMDB 头像路径去重，同一个人在"
+            "多少部片里出现都只存一份；断网时头像照样显示。按画质档位分层存放，换了头像档位后"
+            "旧档位那一层不再使用，可作为孤儿清理。整体重建要重新从外网下载，因此不提供清空。"
+        ),
+        default="data/metadata/people",
+        resolve=lambda s: Path(s.people_images_dir),
+        group=Group.CACHE,
+        rebuild_cost=RebuildCost.EXPENSIVE,
+        clearable=False,
+        orphans=_unused_profile_tiers,
+    ),
     # ---- 用户数据与系统状态：只展示占用，面板不提供删除 -----------------------
     DataDir(
         key="database",
@@ -379,10 +429,68 @@ DATA_DIRS: tuple[DataDir, ...] = (
     DataDir(
         key="models",
         title="模型文件",
-        summary="NER 模型与语音检测模型",
-        description="种子命名识别（NER）模型与字幕同步用的语音检测模型，由应用内更新维护。",
+        summary="NER 模型、语音检测与画面文字识别模型",
+        description=(
+            "种子命名识别（NER）模型与字幕同步用的语音检测模型，由应用内更新维护；"
+            "本地开发时片头片尾识别用的画面文字识别（PP-OCR）模型也放在这里（镜像里已内置）。"
+        ),
         default="data/models",
         resolve=lambda s: Path(s.data_dir) / "models",
+    ),
+    DataDir(
+        key="plugins.patch",
+        title="插件补丁",
+        summary="禁用内置插件、开启本地插件的开关",
+        description=(
+            "插件补丁（plugins.yaml）：可禁用允许关闭的内置子系统，也是开启本地受信插件、"
+            "批准它调用哪些操作的地方；改动在重启后生效，删除即恢复全部默认。"
+        ),
+        default="data/plugins.yaml",
+        resolve=lambda s: Path(s.data_dir) / "plugins.yaml",
+    ),
+    DataDir(
+        key="plugins.local",
+        title="本地插件",
+        summary="用户自己写的插件代码",
+        description=(
+            "本地受信插件的 Python 代码（docs/design/plugin-phase2a.md §6）。只有在 plugins.yaml "
+            "里写了 local: true 的才会加载。packages/ 是安装的第三方插件包（含安装记录），"
+            "data/ 是各插件自己的文件目录（plugin-phase3.md §3、§6）。"
+        ),
+        default="data/plugins",
+        resolve=lambda s: Path(s.data_dir) / "plugins",
+    ),
+    DataDir(
+        key="plugins.boot",
+        title="插件启动记录",
+        summary="插件安全模式用的启动记录",
+        description=(
+            "记录上一次启动加载了哪些本地 / 第三方插件、有没有稳定运行（plugin-phase3.md §5）；"
+            "据此判断是否进入插件安全模式。删除等于忘掉上次启动的情况，不影响数据。"
+        ),
+        default="data/plugins-boot.json",
+        resolve=lambda s: Path(s.data_dir) / "plugins-boot.json",
+    ),
+    DataDir(
+        key="plugins.features",
+        title="功能开关",
+        summary="在「设置 → 插件」停用了哪些功能",
+        description=(
+            "只记停用了的功能（谁、什么时候）；重启后保持（docs/design/plugin-page-tiers.md §6）。"
+            "删除等于把可停用的功能全部重新开启。"
+        ),
+        default="data/plugins-features.json",
+        resolve=lambda s: Path(s.data_dir) / "plugins-features.json",
+    ),
+    DataDir(
+        key="plugins.safe_mode",
+        title="安全模式开关",
+        summary="放一个 SAFE_MODE 文件即以插件安全模式启动",
+        description=(
+            "存在时本次启动跳过全部本地 / 第三方插件；在「设置 → 插件」退出安全模式会删掉它。"
+        ),
+        default="data/SAFE_MODE",
+        resolve=lambda s: Path(s.data_dir) / "SAFE_MODE",
     ),
     DataDir(
         key="site_configs",

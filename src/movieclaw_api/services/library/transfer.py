@@ -56,8 +56,10 @@ from pathlib import Path
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
+from movieclaw_api import event_refs, events
 from movieclaw_api.exceptions import BadRequestException, ConflictException
 from movieclaw_api.services import jobs
+from movieclaw_api.services.library import acquisition
 from movieclaw_api.services.library.config import sanitize_folder_name
 from movieclaw_api.services.library.fsops import rename_no_replace
 from movieclaw_api.services.library.layout import entry_dir_of, entry_dirs, is_disc_dir
@@ -70,7 +72,7 @@ from movieclaw_api.services.library.profile import profile_of
 from movieclaw_api.services.library.sidecar import find_sidecars
 from movieclaw_api.services.task_state import TaskState
 from movieclaw_db.engine import get_database
-from movieclaw_db.models import FileState, Library, LibraryFile, MediaItem, Subscription, utcnow
+from movieclaw_db.models import FileState, Library, LibraryFile, MediaItem, utcnow
 from movieclaw_db.models.media_item import MediaSource
 from movieclaw_db.repositories.library_file_repo import LibraryFileRepository
 from movieclaw_db.repositories.library_repo import LibraryRepository
@@ -279,7 +281,7 @@ def _build_plan_sync(
         ):
             # 缺失行没有磁盘实体；移入回收站形态的待回收行实体在源库
             # .movieclaw-trash 里、不跟条目目录走——都只做逻辑随迁。
-            # **原地待回收行（做种保护形态）不在此列**：它的实体就在条目
+            # **原地待回收行不在此列**：它的实体就在条目
             # 目录里，必须随目录物理搬运并改写路径，否则搬运后行路径陈旧、
             # 清理任务删行收敛，新库里的无台账文件会被扫描重新收编——
             # 证伪版本借转移复活（relocate 的 revive 守卫保证状态保持待回收）
@@ -574,13 +576,11 @@ async def _transfer(
     *,
     context: jobs.JobContext | None = None,
     checkpoint_id: str | None = None,
-    notify_downstream: bool = True,
 ) -> None:
-    """搬运一个条目并随迁台账。
+    """搬运一个条目并随迁台账；搬走了文件就发 ``library.item.moved``。
 
-    ``notify_downstream=False`` 供批量调用方使用：593 个成员各通知一次下游
-    媒体服务器刷新，等于对 Jellyfin/Emby 发起 593 次全库扫描请求——批量在
-    整轮收尾时统一通知一次即可。
+    通知下游媒体服务器刷新由订阅该事件的内置插件做，并把一阵子的转移合成一次刷新
+    （批量转移几百个成员不会对 Jellyfin/Emby 发几百次全库扫描）。
     """
     db = get_database()
     async with db.session() as session:
@@ -591,6 +591,7 @@ async def _transfer(
         summary.target_library_name = target.name
         repo = LibraryFileRepository(session)
         dirty_parents: set[Path] = set()
+        media = None
 
         for done, move in enumerate(plan.moves, start=1):
             if context is not None:
@@ -689,23 +690,25 @@ async def _transfer(
                 _prune_emptied_dirs, dirty_parents, [r.rstrip("/") for r in source.root_paths]
             )
 
-        # 订阅一并改挂目标库：不然下一集下载完又按旧库投递，用户刚搬完就被打回原形
+        # 跟随条目的东西（订阅的目标库）一并改挂：交给获取领域（library-boundary.md §10）
         if summary.files_relocated:
-            subscription = (
-                await session.execute(
-                    select(Subscription).where(Subscription.media_item_id == plan.media_item_id)
-                )
-            ).scalar_one_or_none()
-            if subscription is not None and subscription.library_id != plan.target_library_id:
-                subscription.library_id = plan.target_library_id
-                subscription.updated_at = utcnow()
-                await session.commit()
-                summary.subscription_moved = True
+            summary.subscription_moved = await acquisition.current().item_moved(
+                session, plan.media_item_id, plan.target_library_id
+            )
 
             # 条目身份随迁：本地锚改到新库新路径 + 刮削归属改挂目标库
             await _relocate_item_identity(session, plan, target, summary)
-    if notify_downstream:
-        await notify_media_server()
+            media = event_refs.media_ref(await session.get(MediaItem, plan.media_item_id))
+    if summary.files_relocated and media is not None:
+        from movieclaw_sdk.events import LIBRARY_ITEM_MOVED, ItemMoved
+
+        moved = ItemMoved(
+            media=media,
+            from_library_id=plan.source_library_id,
+            to_library_id=plan.target_library_id,
+            files_moved=summary.files_relocated,
+        )
+        await events.publish_now(LIBRARY_ITEM_MOVED, lambda: moved)
 
     logger.info(
         "条目「%s」已从库 #%s 转移到「%s」：搬运 %d 个路径、随迁 %d 条台账（约 %.1f GB），"
@@ -967,16 +970,6 @@ async def _run_transfer_job(
         finished = (utcnow(), summary)
         _transfer_tasks.finish(plan.source_library_id, result=finished)
         _transfer_tasks.finish(plan.target_library_id, result=finished)
-
-
-async def notify_media_server() -> None:
-    """通知下游媒体服务器刷新；失败只记日志，绝不影响搬运结论。"""
-    from movieclaw_api.services.media_server_notify import notify_media_server_refresh
-
-    try:
-        await notify_media_server_refresh()
-    except Exception:  # noqa: BLE001 -- 下游刷新失败不该影响转移结论
-        logger.warning("转移完成后通知媒体服务器刷新失败（不影响本地库存）", exc_info=True)
 
 
 class _MoveError(Exception):

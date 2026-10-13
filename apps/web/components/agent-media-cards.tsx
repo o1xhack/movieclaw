@@ -30,7 +30,7 @@ import {
 } from "@/lib/api/playback";
 import { getSubscription, type Subscription } from "@/lib/api/subscriptions";
 import { formatBytes } from "@/lib/format";
-import { cachedImageUrl, imageUrl } from "@/lib/image-proxy";
+import { imageUrl, responsiveImage } from "@/lib/image-proxy";
 import type { LibraryKind, MediaItem } from "@/lib/media-types";
 import { playHref, rememberPlayerReturnPath } from "@/lib/player/play-links";
 import { useTapGuard } from "@/lib/use-tap-guard";
@@ -153,7 +153,8 @@ function LibraryMiniCardBody({ library }: { library: MediaLibrary }) {
           </div>
         ) : (
           <img
-            src={libraryCoverUrl(library.id)}
+            // 库卡 248 宽（21:10），悬停放大 1.02
+            {...responsiveImage(libraryCoverUrl(library.id), 248, 1.02)}
             alt=""
             loading="lazy"
             className="absolute inset-0 size-full object-cover transition duration-300 group-hover/lib:scale-[1.02]"
@@ -317,7 +318,8 @@ function LibraryItemPlayCardBody({
     watch && watch.position_ms > 0 && watch.duration_ms
       ? Math.min(100, Math.round((watch.position_ms / watch.duration_ms) * 100))
       : null;
-  const playVerb = watch?.played ? "重新播放" : watch && watch.position_ms > 0 ? "继续播放" : "播放";
+  // 有续播点优先「继续播放」：看完后重看到一半的也接着播（与服务端起播同一口径）
+  const playVerb = watch && watch.position_ms > 0 ? "继续播放" : watch?.played ? "重新播放" : "播放";
 
   return (
     // 两个入口叠在一起：整卡进条目页、中央播放键直接起播。播放键是卡片链接的
@@ -333,7 +335,10 @@ function LibraryItemPlayCardBody({
         <div className="relative aspect-video overflow-hidden rounded-2xl bg-[var(--poster-placeholder)] shadow-[0_10px_28px_rgba(0,0,0,0.38)] ring-1 ring-white/[0.08] transition duration-300 group-hover/play:-translate-y-1 group-hover/play:shadow-[0_18px_42px_rgba(0,0,0,0.55)] group-hover/play:ring-white/25 group-focus-visible/card:ring-2 group-focus-visible/card:ring-white/80">
           {backdrop ? (
             <PosterImage
-              src={imageUrl(backdrop, "landscape-card")}
+              src={imageUrl(backdrop)}
+              // 卡宽 248（手机 212）、16:9，悬停放大 1.03
+              width={248}
+              zoom={1.03}
               alt={`${info.title} 剧照`}
               className="size-full transition duration-500 group-hover/play:scale-[1.03]"
               fallback={<PosterFill title={info.title} posterUrl={poster} />}
@@ -384,12 +389,14 @@ function PosterFill({ title, posterUrl }: { title: string; posterUrl: string | n
       </span>
     );
   }
-  const src = imageUrl(posterUrl, "poster-card");
+  // 2:3 海报贴齐 16:9 卡高（140）居中，宽约 93；模糊铺底与它同一宽度，地址一致只取一次
+  const src = imageUrl(posterUrl);
   return (
     <div className="relative size-full overflow-hidden bg-[#10131c]">
-      <PosterImage src={src} alt="" className="absolute inset-0 size-full scale-125 opacity-45 blur-xl" />
+      <PosterImage src={src} width={96} alt="" className="absolute inset-0 size-full scale-125 opacity-45 blur-xl" />
       <PosterImage
         src={src}
+        width={96}
         alt={`${title} 海报`}
         className="absolute inset-y-0 left-1/2 aspect-[2/3] h-full -translate-x-1/2 object-cover"
       />
@@ -434,7 +441,9 @@ function SubscriptionPosterCardBody({ sub }: { sub: Subscription }) {
     title: sub.media.title,
     year: sub.media.year ?? undefined,
     rating: 0,
-    posterUrl: sub.media.poster_url ? cachedImageUrl(sub.media.poster_url) : "",
+    // imageUrl 而非 cachedImageUrl：订阅对象已入库时海报是本地资产的相对路径；
+    // 宽度由 PosterCard 按卡宽生成 srcset
+    posterUrl: sub.media.poster_url ? imageUrl(sub.media.poster_url) : "",
     ribbon: ribbon?.label,
     ribbonTone: ribbon?.tone,
     ribbonVariant: "compact-left",
@@ -474,7 +483,7 @@ export const AgentMediaCardsBlock = memo(function AgentMediaCardsBlock({
         <h4 className="mb-2 text-sub font-semibold text-[var(--text-muted)]">{group.title}</h4>
       )}
       {/* 负外边距让首张卡与正文左缘对齐，横滚时卡片仍能贴着容器边滑出 */}
-      <HScroller className="-mx-1 gap-3 px-1 pb-2 pt-1">
+      <HScroller className="-mx-1 gap-3 px-1 pt-1.5 pb-2">
         {group.cards.map((spec) => (
           <MediaCard key={spec.key} spec={spec} />
         ))}

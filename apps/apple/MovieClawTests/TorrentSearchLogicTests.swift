@@ -157,10 +157,23 @@ struct TorrentSearchLogicTests {
         #expect(items.contains(URLQueryItem(name: "page", value: "2")))
     }
 
+    @Test func testDetailSearchScopeFollowsMediaKind() {
+        let tv = SearchScope.ofMediaKind("tv")
+        #expect(tv == SearchTab.category(id: "tv", visible: true).scope, "剧集 = 点了内置「剧集」标签")
+        #expect(SearchScope(encoded: tv.encoded) == tv)
+        #expect(SearchScope.ofMediaKind("movie").categories == ["movie"])
+        #expect(SearchScope.ofMediaKind("video") == .all)
+        #expect(SearchScope.ofMediaKind(nil) == .all)
+    }
+
     @Test func testParseStreamEvents() throws {
         let start = ServerEvent(id: nil, event: "start", data: #"{"keyword":"k","label":null,"categories":[],"page":1,"sites":[{"site_id":"a","site_name":"A"}]}"#)
-        guard case let .start(sites) = try APIClient.parseTorrentEvent(start) else { Issue.record("应解析为 start"); return }
+        guard case let .start(sites, alsoKeywords) = try APIClient.parseTorrentEvent(start) else { Issue.record("应解析为 start"); return }
+        #expect(alsoKeywords.isEmpty, "旧版服务端没有 also_keywords")
         #expect(sites.map(\.siteId) == ["a"])
+        let withAlso = ServerEvent(id: nil, event: "start", data: #"{"keyword":"沙丘","also_keywords":["Dune"],"label":null,"categories":[],"page":1,"sites":[]}"#)
+        guard case let .start(_, searched) = try APIClient.parseTorrentEvent(withAlso) else { Issue.record("应解析为 start"); return }
+        #expect(searched == ["Dune"])
         let error = ServerEvent(id: nil, event: "site_error", data: #"{"site_id":"a","site_name":"A","error":"Cookie 已过期","elapsed_ms":1200}"#)
         guard case let .siteError(_, _, message, elapsed) = try APIClient.parseTorrentEvent(error) else { Issue.record("应解析为 site_error"); return }
         #expect(message == "Cookie 已过期")

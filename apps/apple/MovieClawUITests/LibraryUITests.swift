@@ -54,13 +54,134 @@ final class LibraryUITests: XCTestCase {
 
     // MARK: 用例
 
+    /// 合集与媒体库共用 ⋯ 中的切换入口，顶栏不再有独立图标键。
+    @MainActor
+    func testCollectionGalleryModeIsInMoreMenu() throws {
+        let libraries = backend.request("GET", "/libraries") as? [[String: Any]] ?? []
+        let library = try XCTUnwrap(libraries.first {
+            ($0["capabilities"] as? [String: Any])?["playable"] as? Bool == true
+                && (($0["stats"] as? [String: Any])?["item_count"] as? Int ?? 0) > 0
+        })
+        let libraryId = try XCTUnwrap(library["id"] as? Int)
+        let items = backend.request("GET", "/libraries/\(libraryId)/items?limit=1") as? [[String: Any]] ?? []
+        let itemId = try XCTUnwrap(items.first?["media_item_id"] as? Int)
+        let collection = backend.request("POST", "/collections", body: [
+            "name": "模式菜单验收", "library_id": libraryId, "item_ids": [itemId],
+        ]) as? [String: Any]
+        let collectionId = try XCTUnwrap(collection?["id"] as? Int)
+        defer { backend.deleteCollection(collectionId) }
+        let app = launch(route: "/library/\(libraryId)/c/\(collectionId)")
+        let menu = app.buttons["collection-actions"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["图床浏览"].exists)
+        XCTAssertFalse(app.buttons["回到海报墙"].exists)
+
+        menu.tap()
+        let enter = app.buttons["图床浏览"]
+        let initiallyGallery = !enter.waitForExistence(timeout: 2)
+        let action = initiallyGallery ? app.buttons["回到海报墙"] : enter
+        XCTAssertTrue(action.waitForExistence(timeout: 10))
+        action.tap()
+        XCTAssertFalse(app.buttons["图床浏览"].exists)
+        XCTAssertFalse(app.buttons["回到海报墙"].exists)
+        menu.tap()
+        let reverse = app.buttons[initiallyGallery ? "图床浏览" : "回到海报墙"]
+        XCTAssertTrue(reverse.waitForExistence(timeout: 10))
+        if !initiallyGallery {
+            XCTAssertTrue(app.buttons["按作品分组"].exists, "图床偏好应仍能从同一菜单访问")
+        }
+        snapshot("合集模式-收进更多菜单")
+        reverse.tap()
+    }
+
+    /// 一个库切图床，另一个库仍是海报墙；返回与重启后各自记住，反向切换也不串。
+    @MainActor
+    func testGalleryModeIsPerLibrary() throws {
+        let libraries = (backend.request("GET", "/libraries") as? [[String: Any]] ?? []).filter {
+            ($0["capabilities"] as? [String: Any])?["playable"] as? Bool == true
+                && (($0["stats"] as? [String: Any])?["item_count"] as? Int ?? 0) > 0
+        }
+        try XCTSkipIf(libraries.count < 2, "需要两个带作品的可播放媒体库")
+        let firstId = libraries[0]["id"] as! Int
+        let secondId = libraries[1]["id"] as! Int
+        let app = launch(route: "/library")
+
+        func openLibrary(_ id: Int) {
+            let card = app.buttons["library-card-\(id)"]
+            XCTAssertTrue(card.waitForExistence(timeout: 20))
+            card.tap()
+            XCTAssertTrue(app.buttons["更多操作"].waitForExistence(timeout: 20))
+        }
+        func checkMode(gallery: Bool) {
+            app.buttons["更多操作"].tap()
+            let action = app.buttons[gallery ? "回到海报墙" : "图床浏览"]
+            XCTAssertTrue(action.waitForExistence(timeout: 10))
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap()
+            let wall = app.descendants(matching: .any)["poster-wall"]
+            if gallery { XCTAssertFalse(wall.exists) }
+            else { XCTAssertTrue(wall.waitForExistence(timeout: 20)) }
+        }
+        func toggleMode(gallery: Bool) {
+            app.buttons["更多操作"].tap()
+            let action = app.buttons[gallery ? "回到海报墙" : "图床浏览"]
+            XCTAssertTrue(action.waitForExistence(timeout: 10))
+            action.tap()
+        }
+        func backToHome() {
+            app.navigationBars.buttons.firstMatch.tap()
+            XCTAssertTrue(app.staticTexts["library-stats"].waitForExistence(timeout: 20))
+        }
+
+        // 允许在已用过的模拟器上重复运行：先把第二个库收敛到海报墙。
+        openLibrary(secondId)
+        app.buttons["更多操作"].tap()
+        let leave = app.buttons["回到海报墙"]
+        if leave.waitForExistence(timeout: 2) { leave.tap() }
+        else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap() }
+        backToHome()
+        openLibrary(firstId)
+        app.buttons["更多操作"].tap()
+        let enter = app.buttons["图床浏览"]
+        if enter.waitForExistence(timeout: 2) { enter.tap() }
+        else { app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.5)).tap() }
+        backToHome()
+        openLibrary(secondId)
+        checkMode(gallery: false)
+        backToHome()
+        openLibrary(firstId)
+        checkMode(gallery: true)
+        snapshot("每库模式-返回图床库")
+
+        app.terminate()
+        app.launch()
+        openLibrary(firstId)
+        checkMode(gallery: true)
+        toggleMode(gallery: true)
+        backToHome()
+        openLibrary(secondId)
+        toggleMode(gallery: false)
+        backToHome()
+        openLibrary(firstId)
+        checkMode(gallery: false)
+        backToHome()
+        openLibrary(secondId)
+        checkMode(gallery: true)
+        toggleMode(gallery: true)
+    }
+
     /// 首页三块内容与跳转：统计行、我的媒体库卡片、全部合集、自定义首页入口（在右上角 ⋯ 菜单里）
     @MainActor
     func testHomeShowsRowsAndNavigates() {
         let app = launch(route: "/library")
-        XCTAssertTrue(app.staticTexts["library-stats"].waitForExistence(timeout: 20))
-        XCTAssertTrue(app.staticTexts["library-stats"].label.contains("个媒体库"))
+        XCTAssertTrue(app.buttons["library-more"].waitForExistence(timeout: 20))
         snapshot("媒体库首页")
+        // 统计行是页脚（2026-10-13 从页头挪到末尾）：滑到底才建出来
+        let stats = app.staticTexts["library-stats"]
+        for _ in 0 ..< 12 where !stats.exists { app.swipeUp(velocity: .fast) }
+        XCTAssertTrue(stats.waitForExistence(timeout: 5), "页面末尾应有统计行")
+        XCTAssertTrue(stats.label.contains("个媒体库"))
+        snapshot("媒体库首页-页脚")
+        for _ in 0 ..< 12 { app.swipeDown(velocity: .fast) }
         app.buttons["library-more"].tap()
         XCTAssertTrue(app.buttons["library-customize"].waitForExistence(timeout: 5))
         app.buttons["library-customize"].tap()
@@ -237,6 +358,95 @@ final class LibraryUITests: XCTestCase {
             return rows.contains { $0["id"] as? String == "up-next" && $0["hidden"] as? Bool == true }
         }, "隐藏应自动保存到后端")
         snapshot("隐藏一行后")
+    }
+
+    /// 媒体库搜索（统一接口 /search/library）：相关度结果 → 点命中的人物头像进库内影人页（与演职员同一页）→ 返回。
+    /// 关键词用 MC_TEST_LIBRARY_QUERY 指定（默认 ST），服务器上要有能被它命中的作品和人物。
+    @MainActor
+    func testLibrarySearchOpensPersonPage() {
+        let query = env["MC_TEST_LIBRARY_QUERY"] ?? "ST"
+        let app = launch(route: "/search?q=\(query)&tab=library")
+        let items = app.otherElements["library-items"].firstMatch
+        XCTAssertTrue(items.waitForExistence(timeout: 20), "媒体库垂直应出相关度结果")
+        XCTAssertTrue(items.buttons["poster-card"].firstMatch.exists, "结果里应有海报卡")
+        snapshot("媒体库搜索结果")
+
+        let person = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'library-search-person-'")).firstMatch
+        XCTAssertTrue(person.waitForExistence(timeout: 10), "关键词命中的人物应单独成行")
+        let name = person.label.replacingOccurrences(of: "查看 ", with: "").replacingOccurrences(of: " 的影人页", with: "")
+        person.tap()
+        XCTAssertTrue(app.navigationBars[name].waitForExistence(timeout: 20), "点人物应进入「\(name)」的影人页")
+        snapshot("影人页")
+
+        app.navigationBars[name].buttons.firstMatch.tap()
+        XCTAssertTrue(person.waitForExistence(timeout: 20), "返回后应回到搜索结果")
+    }
+
+    /// 搜索面板的媒体库模式：输入即实时出结果（不出「搜索“…”」行、不必回车跳页），改词结果跟着变
+    @MainActor
+    func testLibrarySearchIsLiveInSearchPanel() {
+        let query = env["MC_TEST_LIBRARY_QUERY"] ?? "ST"
+        let app = launch(route: "/library")
+        let open = app.navigationBars.buttons["open-search"]
+        XCTAssertTrue(open.waitForExistence(timeout: 20), "页签根页右上角应有搜索")
+        open.tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        let library = app.segmentedControls.buttons["媒体库"]
+        XCTAssertTrue(library.waitForExistence(timeout: 10), "搜索栏激活时应有媒体库模式")
+        library.tap()
+        field.typeText(query)
+        let items = app.otherElements["library-items"].firstMatch
+        XCTAssertTrue(items.waitForExistence(timeout: 15), "输入后不回车也应实时出结果")
+        XCTAssertFalse(app.buttons["search-submit"].exists, "媒体库模式不该再出「搜索“…”」行")
+        snapshot("搜索面板实时结果")
+        let first = items.buttons["poster-card"].firstMatch.label
+        // 再输入一个字：结果随关键词刷新
+        field.typeText("x")
+        XCTAssertTrue(waitUntil(timeout: 10) {
+            !items.exists || items.buttons["poster-card"].firstMatch.label != first
+                || app.otherElements["library-empty"].exists
+        }, "改词后结果应跟着刷新")
+        snapshot("改词后")
+
+        // 搜索联想：删回原关键词，点第一个联想词 → 填进搜索框
+        field.typeText(XCUIKeyboardKey.delete.rawValue)
+        let suggestion = app.buttons["library-search-suggestion"].firstMatch
+        XCTAssertTrue(suggestion.waitForExistence(timeout: 10), "实时结果上方应有搜索联想")
+        // 无障碍标签形如「搜索「三体」」或「搜索「三体」，首字母匹配」
+        let picked = suggestion.label.components(separatedBy: "「").dropFirst().first?.components(separatedBy: "」").first ?? ""
+        suggestion.tap()
+        XCTAssertTrue(waitUntil(timeout: 10) { (field.value as? String) == picked }, "点联想词应填进搜索框：\(picked)")
+        snapshot("点联想后")
+    }
+
+    /// 右上角 ✕（系统取消搜索）关闭整个搜索页回到来处；压栈进结果页不能被当成取消误关
+    @MainActor
+    func testSearchCancelClosesSearchPage() {
+        let app = launch(route: "/library")
+        let open = app.navigationBars.buttons["open-search"]
+        XCTAssertTrue(open.waitForExistence(timeout: 20))
+        open.tap()
+        let field = app.searchFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        app.segmentedControls.buttons["媒体库"].tap()
+        field.typeText("ST")
+        XCTAssertTrue(app.otherElements["library-items"].firstMatch.waitForExistence(timeout: 15))
+        let cancel = app.buttons.matching(NSPredicate(format: "label IN %@", ["Cancel", "取消", "Close", "关闭"])).firstMatch
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "搜索栏激活时右上角应有取消按钮")
+        cancel.tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 10), "点右上角 ✕ 应关闭搜索页、回到媒体库")
+        XCTAssertFalse(app.otherElements["search-home"].exists || app.collectionViews["search-home"].exists, "不该留下空的搜索页")
+
+        // 回车压栈进结果页：搜索栏失活不能被当成取消
+        open.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        app.segmentedControls.buttons["影视"].tap()
+        field.typeText("沙丘\n")
+        let results = app.scrollViews["media-results"]
+        XCTAssertTrue(results.waitForExistence(timeout: 15), "回车应进入影视结果页")
+        sleep(2)
+        XCTAssertTrue(results.exists, "进入结果页后不该被自动关掉")
     }
 
     private func waitUntil(timeout: TimeInterval = 15, _ condition: @escaping () -> Bool) -> Bool {

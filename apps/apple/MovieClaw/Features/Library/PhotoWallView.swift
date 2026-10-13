@@ -58,6 +58,7 @@ struct PhotoWallView: View {
             }
             .fullScreenCover(item: $lightbox) { session in
                 Lightbox(libraryId: libraryId, feed: feed, fetch: fetch, index: session.index)
+                    .sheetFeedback()
             }
     }
 
@@ -199,7 +200,7 @@ struct PhotoWallView: View {
             Button {
                 lightbox = PhotoLightboxSession(index: index)
             } label: {
-                PhotoTile(item: item, url: api.image(item.posterUrl, density.variant), working: working(item))
+                PhotoTile(item: item, url: api.image(item.posterUrl, width: density.tileImageWidth), working: working(item))
             }
             .buttonStyle(.plain)
             .accessibilityLabel("查看 \(item.title)")

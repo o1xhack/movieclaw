@@ -2,10 +2,23 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { ErrorBanner } from "@/components/cloud-push-ui";
 import { useConfirm } from "@/components/feedback";
 import { CheckIcon, CopyIcon, DownloadIcon, PuzzleIcon, ShieldIcon } from "@/components/icons";
 import { Modal } from "@/components/modal";
-import { EXTENSION_ZIP_URL, useExtensionInstalled } from "@/lib/extension-install";
+import {
+  SETTINGS_BUTTON_CLASS,
+  SETTINGS_DANGER_BUTTON_CLASS,
+  SETTINGS_PRIMARY_BUTTON_CLASS,
+  SettingsList,
+  SettingsRow,
+  SettingsSection,
+} from "@/components/settings-ui";
+import {
+  EXTENSION_FIREFOX_ZIP_URL,
+  EXTENSION_ZIP_URL,
+  useExtensionInstalled,
+} from "@/lib/extension-install";
 import {
   type SyncTokenView,
   generateSyncToken,
@@ -15,14 +28,12 @@ import {
 import { formatDateTime } from "@/lib/time";
 
 /**
- * 浏览器插件卡片：嵌在「资源站点」分区底部（插件是站点 Cookie 同步的配套工具，
- * 不单设分区）。
- * 卡面保持极简（一段说明 + 状态点 + 两个按钮）：
- * - 安装引导收进「安装插件」按钮的弹窗——Chrome 政策不允许商店外插件一键
- *   静默安装，必须手动加载，四步指引在弹窗里讲清楚，不平铺占版面；
- * - 同步令牌：设完即用、极少回访的配置，收进「同步令牌」按钮的弹窗里管理。
+ * 浏览器扩展小节：嵌在「资源站点」分区底部（扩展是站点 Cookie 同步的配套工具，
+ * 不单设分区）。两行：
+ * - 扩展本身：安装状态 + 「安装扩展」——Chrome 政策不允许商店外扩展一键
+ *   静默安装，必须手动加载，四步指引收在弹窗里讲清楚，不平铺占版面；
+ * - 同步令牌：设完即用、极少回访的配置，收进弹窗里管理。
  * 各站点的同步与验证状态直接看上方站点列表，不在这里重复展示。
- * 视觉与站点列表同款扁平面板（配置页不用玻璃质感）。
  */
 export function ExtensionCard() {
   const { installed } = useExtensionInstalled();
@@ -37,55 +48,56 @@ export function ExtensionCard() {
         : { label: "未检测到", color: "#c0c4cc" };
 
   return (
-    <section className="rounded-xl border border-white/[0.08] bg-white/[0.03] p-5">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-3.5">
-          <span className="icon-chip size-10 shrink-0 !rounded-xl">
-            <PuzzleIcon className="size-5" />
+    <SettingsSection
+      title="浏览器扩展"
+      description="在站点页面一键读取登录 Cookie（含 httpOnly）并同步到本服务，免去手动复制粘贴，还能随 Cookie 变化自动保持最新。"
+    >
+      <SettingsList>
+        <SettingsRow
+          leading={
+            <span className="icon-chip size-9 shrink-0 !rounded-xl">
+              <PuzzleIcon className="size-[18px]" />
+            </span>
+          }
+          label="MovieClaw 浏览器扩展"
+          description={
+            installed
+              ? "打开站点页面，点浏览器工具栏的 MovieClaw 图标即可同步；首次使用先生成同步令牌填入扩展。"
+              : "支持 Chrome / Edge 等 Chromium 内核浏览器及 Firefox。"
+          }
+        >
+          <span className="flex items-center gap-1.5 text-sub text-[var(--text-muted)]">
+            <span
+              className={`size-2 rounded-full ${installed === null ? "animate-pulse" : ""}`}
+              style={{ background: badge.color }}
+            />
+            {badge.label}
           </span>
-          <div>
-            <h2 className="text-body-lg font-semibold">MovieClaw 浏览器插件</h2>
-            <p className="mt-0.5 text-sub leading-5 text-[var(--text-muted)]">
-              在站点页面一键读取登录 Cookie（含 httpOnly）并同步到本服务，免去手动复制粘贴，
-              还能随 Cookie 变化自动保持最新。
-            </p>
-          </div>
-        </div>
-        <span className="flex shrink-0 items-center gap-1.5 text-sub text-[var(--text-muted)]">
-          <span
-            className={`size-2 rounded-full ${installed === null ? "animate-pulse" : ""}`}
-            style={{ background: badge.color }}
-          />
-          {badge.label}
-        </span>
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-3">
-        {!installed && (
+          {!installed && (
+            <button
+              type="button"
+              onClick={() => setInstallOpen(true)}
+              className={`${SETTINGS_BUTTON_CLASS} flex items-center gap-1.5`}
+            >
+              <DownloadIcon className="size-4" />
+              安装扩展
+            </button>
+          )}
+        </SettingsRow>
+        <SettingsRow
+          label="同步令牌"
+          description="在扩展的设置里填入此令牌，即可把站点 Cookie 同步到本服务。"
+        >
           <button
             type="button"
-            onClick={() => setInstallOpen(true)}
-            className="btn-accent flex items-center gap-1.5 rounded-full px-4 py-2 text-sub font-semibold"
+            onClick={() => setTokenOpen(true)}
+            className={`${SETTINGS_BUTTON_CLASS} flex items-center gap-1.5`}
           >
-            <DownloadIcon className="size-4" />
-            安装插件
+            <ShieldIcon className="size-4" />
+            管理
           </button>
-        )}
-        <button
-          type="button"
-          onClick={() => setTokenOpen(true)}
-          className="btn-glass flex items-center gap-1.5 px-4 py-2 text-sub font-medium"
-        >
-          <ShieldIcon className="size-4" />
-          同步令牌
-        </button>
-        {installed && (
-          <p className="text-caption text-[var(--text-faint)]">
-            <CheckIcon className="mr-1 inline size-3.5 text-[var(--ok)]" />
-            打开站点页面，点浏览器工具栏的 MovieClaw 图标即可同步；首次使用先生成同步令牌填入插件。
-          </p>
-        )}
-      </div>
+        </SettingsRow>
+      </SettingsList>
 
       <InstallModal
         open={installOpen}
@@ -96,13 +108,13 @@ export function ExtensionCard() {
         }}
       />
       <TokenModal open={tokenOpen} onClose={() => setTokenOpen(false)} />
-    </section>
+    </SettingsSection>
   );
 }
 
 /**
- * 安装指引弹窗：四步明确操作。Chrome 政策不允许商店外插件静默安装，
- * 下载后须在 chrome://extensions 手动加载——步骤只在用户点「安装插件」
+ * 安装指引弹窗：四步明确操作。Chrome 政策不允许商店外扩展静默安装，
+ * 下载后须在 chrome://extensions 手动加载——步骤只在用户点「安装扩展」
  * 时才展开，不在卡面平铺。
  */
 function InstallModal({
@@ -118,7 +130,7 @@ function InstallModal({
     {
       text: (
         <>
-          下载插件包并解压，得到{" "}
+          下载安装包并解压，得到{" "}
           <code className="rounded bg-white/[0.06] px-1 font-mono text-sub">chrome-mv3</code>{" "}
           文件夹。
         </>
@@ -127,10 +139,10 @@ function InstallModal({
         <a
           href={EXTENSION_ZIP_URL}
           download
-          className="btn-accent flex w-fit items-center gap-1.5 rounded-full px-3.5 py-1.5 text-sub font-semibold"
+          className={`${SETTINGS_PRIMARY_BUTTON_CLASS} flex w-fit items-center gap-1.5`}
         >
           <DownloadIcon className="size-4" />
-          下载插件包
+          下载安装包
         </a>
       ),
     },
@@ -149,12 +161,12 @@ function InstallModal({
       text: <>点「加载已解压的扩展程序」，选择第 1 步解压出的文件夹。</>,
     },
     {
-      text: <>生成同步令牌并填入插件设置，之后切回本页会自动识别为「已安装」。</>,
+      text: <>生成同步令牌并填入扩展设置，之后切回本页会自动识别为「已安装」。</>,
       action: (
         <button
           type="button"
           onClick={onOpenToken}
-          className="btn-glass flex w-fit items-center gap-1.5 px-3.5 py-1.5 text-sub font-medium"
+          className={`${SETTINGS_BUTTON_CLASS} flex w-fit items-center gap-1.5`}
         >
           <ShieldIcon className="size-4" />
           去生成令牌
@@ -164,12 +176,12 @@ function InstallModal({
   ];
 
   return (
-    <Modal open={open} onClose={onClose} label="安装浏览器插件" width="lg">
+    <Modal open={open} onClose={onClose} label="安装浏览器扩展" width="lg">
       <div className="space-y-4 p-6">
         <div>
-          <h2 className="text-title font-bold text-[var(--text)]">安装浏览器插件</h2>
+          <h2 className="text-title font-bold text-[var(--text)]">安装浏览器扩展</h2>
           <p className="mt-1 text-sub leading-5 text-[var(--text-muted)]">
-            按下面四步操作，全程约一分钟。Chrome 应用商店政策不允许商店外插件一键安装，
+            按下面四步操作，全程约一分钟。Chrome 应用商店政策不允许商店外扩展一键安装，
             所以需要手动加载一次，之后升级会自动提示。
           </p>
         </div>
@@ -188,15 +200,26 @@ function InstallModal({
           ))}
         </ol>
 
+        <p className="text-sub leading-5 text-[var(--text-muted)]">
+          Firefox 不能用上面的 Chrome 安装包（会提示「已损坏」），请下载{" "}
+          <a href={EXTENSION_FIREFOX_ZIP_URL} download className="text-[var(--text)] underline">
+            Firefox 安装包
+          </a>
+          ，在{" "}
+          <code className="rounded bg-white/[0.06] px-1 font-mono text-sub">about:debugging</code>{" "}
+          →「此 Firefox」→「临时载入附加组件」中直接选择该 zip（不用解压）。安装包未经 Mozilla
+          签名，正式版 Firefox 重启后需重新载入；开发者版 / Nightly / ESR 可把{" "}
+          <code className="rounded bg-white/[0.06] px-1 font-mono text-sub">
+            xpinstall.signatures.required
+          </code>{" "}
+          设为 false 后从附加组件管理器「从文件安装」长期使用。
+        </p>
+
         <div className="flex items-center justify-between gap-3 pt-1">
           <p className="text-caption text-[var(--text-faint)]">
-            支持 Chrome / Edge 等 Chromium 内核浏览器；安装检测同样仅对 Chromium 生效。
+            支持 Chrome / Edge 等 Chromium 内核浏览器及 Firefox；安装检测仅对 Chromium 生效。
           </p>
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-glass shrink-0 px-4 py-2 text-sub font-medium"
-          >
+          <button type="button" onClick={onClose} className={SETTINGS_BUTTON_CLASS}>
             完成
           </button>
         </div>
@@ -239,7 +262,7 @@ function TokenModal({ open, onClose }: { open: boolean; onClose: () => void }) {
       token?.enabled &&
       !(await confirm({
         title: "重新生成同步令牌？",
-        description: "重新生成将使旧令牌立即失效，已配置的插件需要更新令牌。",
+        description: "重新生成将使旧令牌立即失效，已配置的扩展需要更新令牌。",
         confirmLabel: "重新生成",
         tone: "danger",
       }))
@@ -261,7 +284,7 @@ function TokenModal({ open, onClose }: { open: boolean; onClose: () => void }) {
     if (
       !(await confirm({
         title: "关闭 Cookie 同步？",
-        description: "关闭同步将撤销令牌，所有插件都将无法再同步。",
+        description: "关闭同步将撤销令牌，所有扩展都将无法再同步。",
         confirmLabel: "关闭同步",
         tone: "danger",
       }))
@@ -286,16 +309,14 @@ function TokenModal({ open, onClose }: { open: boolean; onClose: () => void }) {
           <div>
             <h2 className="text-title font-bold text-[var(--text)]">同步令牌</h2>
             <p className="mt-1 text-sub leading-5 text-[var(--text-muted)]">
-              在浏览器插件的设置里填入此令牌，即可把站点 Cookie 同步到本服务。令牌长期有效，除非你重新生成。
+              在浏览器扩展的设置里填入此令牌，即可把站点 Cookie 同步到本服务。令牌长期有效，除非你重新生成。
             </p>
           </div>
           <StatusDot on={Boolean(token?.enabled)} />
         </div>
 
         {error && (
-          <div className="rounded-xl border border-[#ff6b6b]/30 bg-[#ff6b6b]/10 px-4 py-3 text-body text-[#ff6b6b]">
-            {error}
-          </div>
+          <ErrorBanner>{error}</ErrorBanner>
         )}
 
         {loading ? (
@@ -308,31 +329,28 @@ function TokenModal({ open, onClose }: { open: boolean; onClose: () => void }) {
           </p>
         )}
 
-        <div className="flex flex-wrap gap-3 pt-1">
-          <button
-            type="button"
-            onClick={onGenerate}
-            disabled={busy || loading}
-            className="btn-accent rounded-full px-4 py-2 text-sub font-semibold disabled:opacity-60"
-          >
-            {token?.enabled ? "重新生成" : "生成令牌"}
-          </button>
+        {/* 危险动作靠左；完成在左、提交在右 */}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           {token?.enabled && (
             <button
               type="button"
               onClick={onRevoke}
               disabled={busy || loading}
-              className="btn-glass px-4 py-2 text-sub font-medium !text-[var(--danger)] hover:!border-[#ff6b6b]/40"
+              className={SETTINGS_DANGER_BUTTON_CLASS}
             >
               关闭同步
             </button>
           )}
+          <button type="button" onClick={onClose} className={`${SETTINGS_BUTTON_CLASS} ml-auto`}>
+            完成
+          </button>
           <button
             type="button"
-            onClick={onClose}
-            className="btn-glass ml-auto px-4 py-2 text-sub font-medium"
+            onClick={onGenerate}
+            disabled={busy || loading}
+            className={SETTINGS_PRIMARY_BUTTON_CLASS}
           >
-            完成
+            {token?.enabled ? "重新生成" : "生成令牌"}
           </button>
         </div>
       </div>

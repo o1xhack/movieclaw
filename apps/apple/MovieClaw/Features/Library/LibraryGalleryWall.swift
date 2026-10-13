@@ -50,10 +50,13 @@ enum GalleryDensity: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 瓦片取哪个规格的图：列窄的两档用 480px 的 photo-tile 派生图；宽松档列宽更大，
-    /// 相册墙直接用 720px 的缩略图本体（nil），图廊没有那层缩略图，自己要 gallery-tile
-    var variant: ImageVariant? {
-        self == .loose ? nil : .photoTile
+    /// 瓦片的取图宽度：按本机屏宽估这一档的列宽（同 `layout` 的列数算法），× 屏幕倍率取到阶梯。
+    /// iPhone 3 倍屏上紧凑约 118 点 → 360 档、标准约 178 点 → 720 档、宽松单列约 361 点 → 1280 档。
+    /// 墙上瓦片与灯箱缩略条用同一个宽度：地址一致，打开灯箱直接命中缓存
+    var tileImageWidth: Int {
+        let width = ImageWidth.screenSize.width - Theme.pagePadding * 2
+        let columns = max(minColumns, Int(((width + gap) / (column + gap)).rounded(.down)))
+        return ImageWidth.points((width - gap * CGFloat(columns - 1)) / CGFloat(columns))
     }
 }
 
@@ -64,29 +67,46 @@ final class GalleryPrefs {
     static let shared = GalleryPrefs()
 
     private static let modeKey = "movieclaw.library.gallery-mode"
+    private static let libraryModesKey = "movieclaw.library.gallery-modes"
     private static let groupedKey = "movieclaw.library.gallery-grouped"
     private static let densityKey = "movieclaw.photo-wall.density"
+    private let defaults: UserDefaults
+    private var libraryModes: [String: Bool] {
+        didSet { defaults.set(libraryModes, forKey: Self.libraryModesKey) }
+    }
 
     /// 是否处于图床浏览模式（⋯ 菜单「图床浏览 / 回到海报墙」）：进详情再退回来还在图廊
     var galleryMode: Bool {
-        didSet { UserDefaults.standard.set(galleryMode, forKey: Self.modeKey) }
+        didSet { defaults.set(galleryMode, forKey: Self.modeKey) }
     }
 
     /// 图床浏览是否按作品分组：默认分组，关掉就是整库一条瀑布流（用户决策 2026-09-07）
     var grouped: Bool {
-        didSet { UserDefaults.standard.set(grouped, forKey: Self.groupedKey) }
+        didSet { defaults.set(grouped, forKey: Self.groupedKey) }
     }
 
     /// 瀑布流密度：图床浏览与照片墙共用，默认标准
     var density: GalleryDensity {
-        didSet { UserDefaults.standard.set(density.rawValue, forKey: Self.densityKey) }
+        didSet { defaults.set(density.rawValue, forKey: Self.densityKey) }
     }
 
-    private init() {
-        let defaults = UserDefaults.standard
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        libraryModes = defaults.dictionary(forKey: Self.libraryModesKey) as? [String: Bool] ?? [:]
         galleryMode = defaults.object(forKey: Self.modeKey) as? Bool ?? false
         grouped = defaults.object(forKey: Self.groupedKey) as? Bool ?? true
         density = defaults.string(forKey: Self.densityKey).flatMap(GalleryDensity.init(rawValue:)) ?? .standard
+    }
+
+    /// 单库与库内合集共用模式，未设置的库默认海报墙；跨库页面保留原来的偏好。
+    func galleryMode(libraryId: Int?) -> Bool {
+        guard let libraryId else { return galleryMode }
+        return libraryModes[String(libraryId)] ?? false
+    }
+
+    func setGalleryMode(_ enabled: Bool, libraryId: Int?) {
+        if let libraryId { libraryModes[String(libraryId)] = enabled }
+        else { galleryMode = enabled }
     }
 }
 
@@ -289,6 +309,7 @@ struct LibraryGalleryWall: View {
                     fetch: fetch,
                     onLeave: { afterDismiss = $0 }
                 )
+                .sheetFeedback()
             }
     }
 
@@ -378,7 +399,7 @@ struct LibraryGalleryWall: View {
             Button {
                 lightbox = LightboxSession(index: index)
             } label: {
-                RemoteImage(url: api.image(image.url, prefs.density.variant ?? .galleryTile), placeholderSymbol: "photo")
+                RemoteImage(url: api.image(image.url, width: prefs.density.tileImageWidth), placeholderSymbol: "photo")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                     .overlay(alignment: .topTrailing) {
@@ -597,15 +618,14 @@ private struct GalleryLightbox: View {
     @Environment(\.api) private var api
     @Environment(\.dismiss) private var dismiss
     @Environment(Router.self) private var router
-    @State private var note: String?
+    @Environment(Feedback.self) private var feedback
 
     var body: some View {
         LibraryZoomableImage.Lightbox(
             slides: slides,
             index: $index,
             hasMore: feed.hasMore,
-            onReachEnd: { Task { await feed.loadMore(fetch: fetch) } },
-            note: note
+            onReachEnd: { Task { await feed.loadMore(fetch: fetch) } }
         ) {
             if let current {
                 let (group, image) = current
@@ -651,12 +671,12 @@ private struct GalleryLightbox: View {
         feed.entries.enumerated().map { i, entry in
             let group = feed.groups[entry.group]
             let image = group.images[entry.image]
-            // 墙上的派生图先铺底，主图走屏幕适配派生（长边 2048、转 WebP，翻页跟手）
+            // 墙上的派生图（同一个地址，命中缓存）先铺底，主图按屏宽像素取（翻页跟手）
             return LibraryZoomableImage.Slide(
                 id: i,
                 title: "\(LibraryGalleryWall.groupTitle(group)) · \(image.label)",
-                thumbURL: api.image(image.url, .photoTile),
-                screenURL: api.image(image.url, .photoScreen),
+                thumbURL: api.image(image.url, width: GalleryPrefs.shared.density.tileImageWidth),
+                screenURL: api.image(image.url, width: ImageWidth.screen),
                 aspect: image.aspect
             )
         }
@@ -674,10 +694,8 @@ private struct GalleryLightbox: View {
                 try await feed.setFavorite(group.mediaItemId, next, api: api)
             } catch is CancellationError {
             } catch {
-                // 全屏灯箱盖住了全局 Toast，失败原因就地提示
-                note = error.localizedDescription.isEmpty ? "收藏失败，请稍后重试" : error.localizedDescription
-                try? await Task.sleep(for: .seconds(4))
-                note = nil
+                // 灯箱挂了自己的提示宿主（sheetFeedback），与全 App 同一种顶部提示
+                feedback.error(error.localizedDescription.isEmpty ? "收藏失败，请稍后重试" : error.localizedDescription)
             }
         }
     }

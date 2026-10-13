@@ -7,8 +7,9 @@ import Link from "next/link";
 
 import {
   JOB_STATUS_LABELS,
-  JOB_TYPE_LABELS,
+  jobTypeLabel,
   JobCard,
+  jobDetailItems,
   TaskActionsMenu,
   TaskStatusDot,
 } from "@/components/job-center";
@@ -613,14 +614,17 @@ function TaskTimelineItem({
   tone = "active",
   children,
 }: {
-  tone?: "active" | "waiting" | "success" | "cancelled";
+  /** partial：完成了但有没办成的部分（如刷新时几张图没下到），琥珀色对勾 */
+  tone?: "active" | "waiting" | "success" | "partial" | "cancelled";
   children: React.ReactNode;
 }) {
-  const completed = tone === "success" || tone === "cancelled";
+  const completed = tone === "success" || tone === "partial" || tone === "cancelled";
   const dotClass =
     tone === "waiting"
       ? "bg-[var(--warn)] ring-[var(--warn)]/25"
-      : tone === "success"
+      : tone === "partial"
+        ? "bg-[var(--warn)] text-[#1a1203] ring-[var(--warn)]/20"
+        : tone === "success"
         ? "bg-[var(--ok)] text-[#07120b] ring-[var(--ok)]/20"
         : tone === "cancelled"
           ? "bg-white/20 text-white/60 ring-white/10"
@@ -633,7 +637,7 @@ function TaskTimelineItem({
             completed ? "size-4" : "mt-0.5 size-2.5"
           } ${dotClass}`}
         >
-          {tone === "success" && <CheckIcon className="size-2.5" />}
+          {(tone === "success" || tone === "partial") && <CheckIcon className="size-2.5" />}
           {tone === "cancelled" && <XIcon className="size-2.5" />}
         </span>
         <span
@@ -658,6 +662,7 @@ const ACTIVE_JOB_ACTIONS: Record<string, string> = {
   "library.chapter_images": "正在生成章节",
   "library.skip_segments": "正在识别片头片尾",
   "media.skip_segments": "正在识别片头片尾",
+  "reels.clips": "正在预切片段",
   "library.organize": "正在整理文件",
   "library.transfer": "正在转移文件",
   "library.ingest": "正在入库",
@@ -671,6 +676,7 @@ const COMPLETED_JOB_ACTIONS: Record<string, string> = {
   "library.chapter_images": "章节生成",
   "library.skip_segments": "片头片尾识别",
   "media.skip_segments": "片头片尾识别",
+  "reels.clips": "片段预切",
   "library.organize": "文件整理",
   "library.transfer": "文件转移",
   "library.ingest": "入库",
@@ -718,9 +724,11 @@ function jobProgressAmount(job: JobView): string | null {
       ? "个分块"
       : job.job_type === "library.scan"
         ? "个文件"
-        : job.job_type.includes("metadata.refresh")
-          ? "个条目"
-          : "项";
+        : job.job_type === "media.metadata.refresh"
+          ? "张图片"
+          : job.job_type === "library.metadata.refresh"
+            ? "个条目"
+            : "项";
   return `已处理 ${current} / ${total} ${unit}`;
 }
 
@@ -751,7 +759,7 @@ function historicalJobTitle(job: JobView): string {
   const result =
     job.status === "cancelled" ? "已取消" : job.status === "failed" ? "未完成" : "完成";
   if (identity && action) return `${identity}${action}${result}`;
-  return `${identity || JOB_TYPE_LABELS[job.job_type] || job.job_type}${result}`;
+  return `${identity || jobTypeLabel(job)}${result}`;
 }
 
 function historicalJobSummary(job: JobView): string {
@@ -782,7 +790,9 @@ function ActiveJobFeedItem({
   const percent = job.progress.percent;
   const amount = jobProgressAmount(job);
   const cancellable = job.status !== "cancelling";
-  const title = jobFeedIdentity(job) || JOB_TYPE_LABELS[job.job_type] || job.job_type;
+  const title = jobFeedIdentity(job) || jobTypeLabel(job);
+  // 元数据刷新的图片记账（新下载 / 沿用 / 失败）；其余类型的过程信息已在摘要里
+  const details = job.job_type.includes("metadata.refresh") ? jobDetailItems(job) : [];
   return (
     <article className="min-w-0 py-1.5">
       <div className="flex min-w-0 items-start justify-between gap-3">
@@ -815,6 +825,20 @@ function ActiveJobFeedItem({
         <OverflowText lines={2} className="mt-1.5 text-caption leading-5 text-white/42">
           {job.progress.message}
         </OverflowText>
+      )}
+      {details.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {details.map((item) => (
+            <span
+              key={item.label}
+              className={`tnum rounded-md px-1.5 py-0.5 text-caption ${
+                item.alert ? "bg-[var(--warn)]/12 text-[var(--warn)]" : "bg-white/[0.06] text-white/55"
+              }`}
+            >
+              {item.label}
+            </span>
+          ))}
+        </div>
       )}
       {(percent != null || job.status === "running") && (
         <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
@@ -1186,7 +1210,13 @@ function TaskHistorySection({
             {group.jobs.map((job) => (
               <TaskTimelineItem
                 key={job.id}
-                tone={job.status === "succeeded" ? "success" : "cancelled"}
+                tone={
+                  job.status !== "succeeded"
+                    ? "cancelled"
+                    : jobDetailItems(job).some((item) => item.alert)
+                      ? "partial"
+                      : "success"
+                }
               >
                 <HistoricalJobFeedItem
                   job={job}
@@ -1623,6 +1653,7 @@ function DownloadTaskGroupCard({
           <div className="aspect-[2/3] overflow-hidden rounded-lg bg-[var(--poster-placeholder)] ring-1 ring-white/10">
             <PosterImage
               src={imageUrl(group.posterUrl)}
+              width={40}
               alt={`${group.title}海报`}
               className="size-full"
               fallback={
@@ -2483,7 +2514,7 @@ export function ActiveJobRow({ job }: { job: JobView }) {
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-2">
           <span className="min-w-0 truncate text-ui font-semibold text-[var(--text)]">
-            {jobFeedIdentity(job) || JOB_TYPE_LABELS[job.job_type] || job.job_type}
+            {jobFeedIdentity(job) || jobTypeLabel(job)}
           </span>
           {percent != null && (
             <span className="tnum ml-auto shrink-0 text-sub font-semibold text-[var(--text-muted)]">

@@ -5,11 +5,13 @@
 所以直接在进程内读 FastAPI 路由表 + Pydantic json schema 来生成。
 
 产物（覆盖写入，勿手改）：
-  MovieClaw/Core/API/Generated/Models.swift     全部请求/响应模型（命名空间 `API`）
-  MovieClaw/Core/API/Generated/Endpoints.swift  每个业务接口一个 async 函数（APIClient 扩展）
+  Shared/Core/API/Generated/Models.swift        全部请求/响应模型（命名空间 `API`）
+  Shared/Core/API/Generated/Endpoints.swift     每个业务接口一个 async 函数（APIClient 扩展）
 
 用法（在仓库根目录，用后端的虚拟环境跑）：
   .venv/bin/python apps/apple/scripts/gen_api.py
+  # 仅同步指定模型，保留其它模块的生成产物：
+  .venv/bin/python apps/apple/scripts/gen_api.py --models SubscriptionView,WantedView
 
 生成规则要点：
 - 响应模型按「序列化」口径出 schema，且所有字段视为必有（后端 ApiResponse 不做
@@ -33,8 +35,23 @@ from pydantic import BaseModel, TypeAdapter
 from pydantic.json_schema import GenerateJsonSchema
 
 ROOT = Path(__file__).resolve().parents[3]
-OUT_DIR = ROOT / "apps/apple/MovieClaw/Core/API/Generated"
+OUT_DIR = ROOT / "apps/apple/Shared/Core/API/Generated"
 API_PREFIX = "/api/v1"
+
+# 新增响应字段在旧服务器中不存在。保持可选，也保留既有 Swift 本地构造调用。
+BACKWARD_COMPATIBLE_RESPONSE_FIELDS = {
+    "SubscriptionView": {"selection_mode"},
+    "SubscriptionDetailView": {"selection_mode"},
+    "WantedView": {"selection_version"},
+    "MetadataScrapeSetting": {
+        "logo_language_priority",
+        "fanart_enabled",
+        "poster_source_order",
+        "backdrop_source_order",
+        "logo_source_order",
+        "season_poster_source_order",
+    },
+}
 
 SWIFT_KEYWORDS = {
     "associatedtype",
@@ -252,7 +269,11 @@ def gen_struct(name: str, schema: dict, defs: dict) -> list[str]:
             swift_name += "_"
         used.add(swift_name)
         typ, nullable = swift_type(prop, defs)
-        optional = nullable or json_key not in required
+        optional = (
+            nullable
+            or json_key not in required
+            or json_key in BACKWARD_COMPATIBLE_RESPONSE_FIELDS.get(name, set())
+        )
         lines += doc_lines(prop.get("description"), "        ")
         if prop.get("readOnly") and not optional:
             # 计算字段由服务端推导：解码时照常必有，本地构造时不必填（数组给空、其余可选）
@@ -351,6 +372,8 @@ def main() -> int:
         if not isinstance(original, APIRoute):
             continue
         path = ctx.path if ctx is not None else original.path
+        # 路径参数的转换器（{account_id:path}）不属于 URL 模板：与 OpenAPI 一样只留参数名
+        path = re.sub(r"\{(\w+):[^}]+\}", r"{\1}", path)
         include = ctx.include_in_schema if ctx is not None else original.include_in_schema
         if not include or not path.startswith(API_PREFIX):
             continue
@@ -457,6 +480,21 @@ def main() -> int:
         model_lines.append("")
     model_lines.append("}")
 
+    if "--models" in sys.argv:
+        names = sys.argv[sys.argv.index("--models") + 1].split(",")
+        path = OUT_DIR / "Models.swift"
+        source = path.read_text(encoding="utf-8")
+        for name in names:
+            replacement = "\n".join(gen_struct(name, defs[name], defs))
+            replacement = replacement[replacement.index("    struct ") :]
+            pattern = rf"    struct {re.escape(name)}:.*?^    }}"
+            source, count = re.subn(pattern, lambda _, replacement=replacement: replacement, source, flags=re.S | re.M)
+            if count != 1:
+                raise ValueError(f"Expected one existing model: {name}")
+        path.write_text(source, encoding="utf-8")
+        print(f"已同步模型：{', '.join(names)}")
+        return 0
+
     # ---- Endpoints.swift ----
     ep = [
         "// 由 apps/apple/scripts/gen_api.py 生成，勿手改。重新生成见脚本头部说明。",
@@ -550,9 +588,11 @@ def main() -> int:
         if any(field.field_info.is_required() for kind, field, _ in params):
             continue
         name = op_func_name(route).strip("`")
+        # 媒体库搜索的 q 与 person_id 是二选一条件，静态签名均可选，实际不能全空。
+        args = 'q: "xjcy"' if name == "searchLibrary" else ""
         tests.append(f"    @Test func {name}() async throws {{")
         tests.append(
-            f"        try await LiveServer.check {{ try await $0.{op_func_name(route)}() }}"
+            f"        try await LiveServer.check {{ try await $0.{op_func_name(route)}({args}) }}"
         )
         tests.append("    }")
     tests.append("}")

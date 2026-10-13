@@ -42,6 +42,7 @@ GOP。方向恒为「稍早」而非「跳过内容」——对用户是安全�
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -389,6 +390,30 @@ def native_tonemap_filter(backend: HwBackend) -> str | None:
     return _PROBED_TONEMAP.get(backend.name, backend.tonemap_filter)
 
 
+#: VAAPI 的低功耗编码（Intel VDEnc 定长电路）。Intel 自 11/12 代起主推这条路；issue #763 的
+#: SR-IOV 虚拟核显（12 代，黑群晖跑在虚拟机里）上，默认的普通编码一跑真实片子就让 GPU 挂死
+#: 重置，换低功耗整条链（硬解 → tonemap_vaapi → scale_vaapi → 编码）正常。老核显不支持它，
+#: 所以不写死，由自检确认后回写（``register_encoder_options``）。
+VAAPI_LOW_POWER: tuple[str, ...] = ("-low_power", "1")
+
+#: 后端名 → 经硬件自检确认、要跟在编码器后面的参数。见 ``VAAPI_LOW_POWER``。
+_PROBED_ENCODER_OPTIONS: dict[str, tuple[str, ...]] = {}
+
+
+def register_encoder_options(backend: str, options: tuple[str, ...]) -> None:
+    """自检确认某后端的编码器要加哪些参数（空=不加）。与 ``register_native_tonemap``
+    同理：只由 ``hwprobe`` 写，装配层保持纯函数。"""
+    if options:
+        _PROBED_ENCODER_OPTIONS[backend] = options
+    else:
+        _PROBED_ENCODER_OPTIONS.pop(backend, None)
+
+
+def encoder_options(backend: HwBackend) -> tuple[str, ...]:
+    """该后端这次编码要追加的参数。"""
+    return _PROBED_ENCODER_OPTIONS.get(backend.name, ())
+
+
 def _needs_software_filters(
     plan: PlaybackPlan, backend: HwBackend | None, *, burn: bool
 ) -> bool:
@@ -469,6 +494,8 @@ def build_hls_command(
     worker_caps: WorkerVideoCaps | None = None,
     progressive: bool = False,
     seek_pad_s: float = 0.5,
+    protocol_whitelist: str | None = None,
+    input_options: Sequence[str] = (),
 ) -> TranscodeCommand:
     """把播放计划翻成 ffmpeg 命令。档 0（Direct Play）不该走到这里。
 
@@ -487,6 +514,9 @@ def build_hls_command(
 
     ``seek_pad_s``：直通档 ``-ss`` 往起点后多给的秒数（见下面的注释）。VOD 重启由会话层按
     分片规划给（``SegmentPlan.seek_pad``），不能越过下一个关键帧。
+
+    ``input_options``：放在 ``-i`` 前的额外输入选项。网盘（strm）条目的源是网盘直链，
+    带协议白名单与断线续读（``streaming.strm_input_args``）。
 
     ``progressive``（只对远程 VOD 的 fMP4 任务有效）：不用 HLS muxer，输出一整条分片化
     MP4（每 0.5 秒一个片段，时间戳保持文件绝对时间），由 Worker 按分片栅格切段、边产出
@@ -561,7 +591,10 @@ def build_hls_command(
     if input_format == "concat":
         # -safe 0：清单里是绝对路径（默认的 safe 模式只认相对路径）
         argv += ["-f", "concat", "-safe", "0"]
-    argv += ["-i", source_path]
+        if protocol_whitelist:
+            # 光盘镜像的段写成 subfile 区间（iso_source.py）：concat 默认只放行 file 协议
+            argv += ["-protocol_whitelist", protocol_whitelist]
+    argv += [*input_options, "-i", source_path]
 
     # 只取一路视频一路音频；字幕流不进输出容器（-sn）——默认旁挂由前端渲染
     # （硬边界 1）。唯一例外：用户显式选中 PGS 触发的烧录，字幕经 filter_complex
@@ -728,10 +761,15 @@ def _video_args(
     args = []
     if filters:
         args += ["-vf", filters]
+    if vt_mode == VT_GPU:
+        # GPU 链路由 scale_vt 控制输出尺寸。输入帧的尺寸、色彩范围或硬件帧上下文
+        # 变化时，ffmpeg 重建滤镜图会按上次输出尺寸插入软件 scaler_out；它接不了
+        # videotoolbox_vld，导致 -78 退出。关闭这层自动缩放，保持整条链使用硬件帧。
+        args += ["-noautoscale"]
     maxrate = maxrate_for_video(plan.video)
     bufsize = f"{float(maxrate[:-1]) * 2:g}M"
     if backend is not None:
-        args += ["-c:v", backend.encoder]
+        args += ["-c:v", backend.encoder, *encoder_options(backend)]
         # iOS 原生 HLS 对 10-bit/High 10 的硬件编码结果兼容性很差，统一锁
         # 到 High profile + 8-bit yuv420p。VideoToolbox 不能在 4K 输出时强制
         # 使用 High@4.1（会以 kVTParameterErr=-12902 拒绝创建编码器），因此
@@ -890,6 +928,10 @@ def _filter_chain(
     return ",".join(parts)
 
 
+#: 音频编码器开头的预填充采样数（ffmpeg 自带编码器的 initial_padding），见 _audio_args
+_ENCODER_DELAY_SAMPLES = {"aac": 1024, "eac3": 256, "ac3": 256}
+
+
 def _audio_args(plan: PlaybackPlan, *, has_audio: bool, absolute_ts: bool) -> list[str]:
     if not has_audio:
         return []
@@ -914,6 +956,15 @@ def _audio_args(plan: PlaybackPlan, *, has_audio: bool, absolute_ts: bool) -> li
     # 几千秒的静音来「补偿」（实测：从 3393 秒处续播，ffmpeg 埋头填了 17 秒
     # 静音才吐出第一个分片，前端就卡在「正在判断播放方式」）。
     resample = "aresample=async=1" if absolute_ts else "aresample=async=1:first_pts=0"
+    delay = _ENCODER_DELAY_SAMPLES.get(codec.lower(), 0)
+    if absolute_ts and delay:
+        # 编码器开头有一段预填充（AAC 1024、E-AC-3 256 个采样），第一个包的时间戳因此是负的；
+        # -copyts + avoid_negative_ts disabled 下它原样落进分片，fMP4 的 tfdt 成了 -1024。
+        # tfdt 按规范是无符号数：Safari、hls.js 宽容地当有符号读，ExoPlayer（Android TV）
+        # 严格按规范读，直接报「Top bit not zero」起不了播。把音频整体后移一个预填充，
+        # 第一个包落在源片的音频起点上；视频时间戳不动，分片仍是文件时间（seek 重开也一样）。
+        # 代价是音频比原来晚这一个预填充（AAC 48kHz 约 21 毫秒），在唇音同步的容差之内。
+        resample += f",asetpts=PTS+{delay}/SR/TB"
     if plan.audio.downmix:
         args += ["-af", f"{_DOWNMIX_PAN},{resample}"]
     else:

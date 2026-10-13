@@ -34,7 +34,11 @@ final class DiscoverUITests: XCTestCase {
 
     @MainActor
     private func snapshot(_ name: String) {
-        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        let screenshot = XCUIScreen.main.screenshot()
+        if let directory = env["MC_SHOT_DIR"] {
+            try? screenshot.pngRepresentation.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+        }
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
@@ -140,8 +144,62 @@ final class DiscoverUITests: XCTestCase {
         seven.tap()
         XCTAssertTrue(app.buttons["最低评分：7 分以上"].waitForExistence(timeout: 10), "胶囊应写出当前值")
         snapshot("筛选结果")
+        // 结果页复用同一类型菜单：增加、取消一个类型都必须真正更新筛选。
+        app.buttons["类型：剧情"].tap()
+        let comedy = app.buttons["喜剧"].firstMatch
+        XCTAssertTrue(comedy.waitForExistence(timeout: 5))
+        comedy.tap()
+        let combined = app.buttons["类型：剧情、喜剧"]
+        XCTAssertTrue(combined.waitForExistence(timeout: 10))
+        combined.tap()
+        app.buttons["剧情"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["类型：喜剧"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["筛选：喜剧"].exists)
+        snapshot("类型多选与取消")
         app.buttons["filtered-clear"].tap()
         XCTAssertTrue(app.otherElements["discover-hero"].waitForExistence(timeout: 30), "清空条件回到发现页")
+    }
+
+    /// 底栏「发现」总是回到无筛选首页，保留电影/剧集视角；筛选结果不是导航栈中的二级页。
+    @MainActor
+    func testDiscoverTabReturnsHome() throws {
+        let app = try launch(route: "/discover/tv?genres=18&rating=7")
+        XCTAssertTrue(app.staticTexts["筛选结果"].waitForExistence(timeout: 30))
+        let discoverTab = app.tabBars.buttons["发现"].firstMatch
+        XCTAssertTrue(discoverTab.waitForExistence(timeout: 10))
+        discoverTab.tap()
+        XCTAssertTrue(app.staticTexts["筛选结果"].waitForNonExistence(timeout: 10), "再次点发现应清空筛选")
+        XCTAssertTrue(app.buttons["筛选：全部"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["discover-title-menu"].label.contains("剧集"))
+        snapshot("发现-底栏返回首页")
+
+        // 离开后点回发现，同样回首页，而不是恢复先前的筛选结果。
+        pickGenre(app, app.buttons["discover-filter"], "剧情")
+        XCTAssertTrue(app.staticTexts["筛选结果"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["订阅"].firstMatch.tap()
+        discoverTab.tap()
+        XCTAssertTrue(app.staticTexts["筛选结果"].waitForNonExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["筛选：全部"].waitForExistence(timeout: 10))
+
+        // 从筛选结果进入影片详情，再点底栏，需要同时退栈和清空根页面筛选。
+        pickGenre(app, app.buttons["discover-filter"], "剧情")
+        let card = app.buttons["poster-card"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 30))
+        card.tap()
+        XCTAssertTrue(app.buttons["poster-card-subscribe"].waitForExistence(timeout: 5))
+        card.tap()
+        XCTAssertTrue(app.scrollViews["media-detail"].waitForExistence(timeout: 30))
+        discoverTab.tap()
+        XCTAssertTrue(app.scrollViews["media-detail"].waitForNonExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["筛选结果"].exists)
+        XCTAssertTrue(app.buttons["筛选：全部"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["discover-title-menu"].label.contains("剧集"))
+
+        pickFromTitleMenu(app, "豆瓣")
+        discoverTab.tap()
+        XCTAssertTrue(app.buttons["discover-title-menu"].label.contains("豆瓣"))
+        XCTAssertTrue(app.buttons["discover-title-menu"].label.contains("剧集"))
+        snapshot("发现-返回保留数据源")
     }
 
     /// 右上角筛选菜单 →「类型」二级菜单 → 选一项（等类型清单加载）
@@ -151,8 +209,9 @@ final class DiscoverUITests: XCTestCase {
         let genres = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "类型")).firstMatch
         XCTAssertTrue(genres.waitForExistence(timeout: 10), "筛选菜单里没有「类型」")
         genres.tap()
+        snapshot("类型菜单")
         let genre = app.buttons[name].firstMatch
-        XCTAssertTrue(genre.waitForExistence(timeout: 20), "类型菜单里没有「\(name)」")
+        XCTAssertTrue(genre.waitForExistence(timeout: 20), "类型菜单里没有「\(name)」\n\(app.debugDescription)")
         genre.tap()
     }
 
@@ -195,6 +254,62 @@ final class DiscoverUITests: XCTestCase {
 
     // MARK: 搜索
 
+    /// 只在隔离测试实例运行：预先播种两类独有关键词与「共同关键词」，允许清空影视历史。
+    /// MC_TEST_HISTORY_FIXTURE=1 表示调用方已准备好临时实例，不能对日常使用的服务器运行。
+    @MainActor
+    func testSearchHistoryFollowsMode() throws {
+        guard env["MC_TEST_HISTORY_FIXTURE"] == "1" else {
+            throw XCTSkip("需要隔离的搜索历史测试数据")
+        }
+        let app = try launch()
+        let search = app.navigationBars.buttons["open-search"]
+        XCTAssertTrue(search.waitForExistence(timeout: 20))
+        search.tap()
+        let media = app.segmentedControls.buttons["影视"]
+        let torrent = app.segmentedControls.buttons["资源"]
+        let library = app.segmentedControls.buttons["媒体库"]
+        XCTAssertTrue(media.waitForExistence(timeout: 10))
+
+        func history(_ keyword: String) -> XCUIElement {
+            app.buttons.matching(NSPredicate(format: "identifier == 'history-row' AND label CONTAINS %@", keyword)).firstMatch
+        }
+
+        media.tap()
+        XCTAssertTrue(history("影视独有记录").waitForExistence(timeout: 10))
+        XCTAssertFalse(history("资源独有记录").exists)
+        // 来回切换后，关键词相同的两类记录也不能串入当前分类。
+        for _ in 0 ..< 2 {
+            torrent.tap()
+            XCTAssertTrue(history("资源独有记录").waitForExistence(timeout: 10))
+            XCTAssertFalse(history("影视独有记录").exists)
+            media.tap()
+            XCTAssertTrue(history("影视独有记录").waitForExistence(timeout: 10))
+            XCTAssertFalse(history("资源独有记录").exists)
+        }
+        history("影视独有记录").tap()
+        XCTAssertTrue(app.scrollViews["media-results"].waitForExistence(timeout: 10))
+        let back = app.navigationBars.buttons["搜索"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        back.tap()
+        XCTAssertTrue(history("影视独有记录").waitForExistence(timeout: 10), "结果页返回应刷新当前分类")
+        app.searchFields.firstMatch.tap()
+        XCTAssertTrue(library.waitForExistence(timeout: 5))
+        library.tap()
+        XCTAssertEqual(app.buttons.matching(identifier: "history-row").count, 0)
+        XCTAssertFalse(app.buttons["history-clear"].exists)
+        media.tap()
+        XCTAssertTrue(history("影视独有记录").waitForExistence(timeout: 10))
+        app.buttons["history-clear"].tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: history("影视独有记录"))
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 10), .completed)
+        torrent.tap()
+        XCTAssertTrue(history("资源独有记录").waitForExistence(timeout: 10), "清空影视不能删除资源历史")
+        media.tap()
+        XCTAssertTrue(app.staticTexts["还没有搜索记录"].waitForExistence(timeout: 10))
+        XCTAssertFalse(history("影视独有记录").exists)
+        snapshot("搜索历史-按分类清空")
+    }
+
     @MainActor
     func testSearchHomeAndMediaLibraryVerticals() throws {
         let app = try launch()
@@ -214,9 +329,9 @@ final class DiscoverUITests: XCTestCase {
         XCTAssertTrue(app.buttons["poster-card"].waitForExistence(timeout: 40), "影视搜索应有结果")
         snapshot("影视搜索结果")
         app.segmentedControls["search-vertical"].buttons["媒体库"].tap()
-        let group = app.otherElements["library-group"].firstMatch
+        let items = app.otherElements["library-items"].firstMatch
         let empty = app.otherElements["library-empty"]
-        XCTAssertTrue(group.waitForExistence(timeout: 20) || empty.exists, "媒体库垂直应出分组或空态")
+        XCTAssertTrue(items.waitForExistence(timeout: 20) || empty.exists, "媒体库垂直应出相关度结果或空态")
         snapshot("媒体库搜索结果")
     }
 
@@ -226,6 +341,9 @@ final class DiscoverUITests: XCTestCase {
         let searchButton = app.navigationBars.buttons["open-search"]
         XCTAssertTrue(searchButton.waitForExistence(timeout: 20), "标签根页右上角应有搜索")
         searchButton.tap()
+        let mode = app.segmentedControls.buttons["资源"]
+        XCTAssertTrue(mode.waitForExistence(timeout: 10))
+        mode.tap()
         let row = app.buttons.matching(NSPredicate(format: "identifier == 'history-row' AND label CONTAINS %@", torrentKeyword)).firstMatch
         guard row.waitForExistence(timeout: 15) else {
             throw XCTSkip("最近搜索里没有「\(torrentKeyword)」的站点资源快照，跳过（避免发起真实 PT 搜索）")

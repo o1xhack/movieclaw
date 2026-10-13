@@ -7,7 +7,7 @@ import {
   type TitleSearchData,
   type TitleSearchDto,
 } from "@/lib/api/discover";
-import type { LibrarySearchGroup } from "@/lib/api/libraries";
+import type { LibraryItem } from "@/lib/api/libraries";
 import type { SearchScope, SearchTab, TorrentCategory } from "@/lib/categories";
 import type { MediaSource } from "@/lib/media-types";
 
@@ -109,11 +109,15 @@ export interface SiteSearchStatus {
   error: string | null;
   /** 该站从发起到返回/失败的耗时（毫秒）；老快照数据可能为 null */
   elapsed_ms: number | null;
+  /** 该站明确告知后面还有没有页；null / 缺省 = 不确定（老服务器没有这个字段） */
+  has_more?: boolean | null;
 }
 
 /** 跨站聚合搜索结果（见 schemas.search.SearchResponse）。 */
 export interface SearchResponse {
   keyword: string;
+  /** 同搜词回显（后端清洗去重后）；只搜主词时为 null */
+  also_keywords?: string[] | null;
   /** 请求方传入的展示名回显（分类中文名/预设名）；null=全部 */
   label: string | null;
   /** 分类组合回显；空=不限分类 */
@@ -127,6 +131,8 @@ export interface SearchResponse {
 export interface SearchHistoryItem {
   id: number;
   keyword: string;
+  /** 同搜词快照（英文名/原名）：点历史重搜时原样带上；null=只搜主词（老服务端没有该字段） */
+  also_keywords?: string[] | null;
   /** 搜索垂直；公开契约使用与 CLI 一致的领域名。 */
   vertical: "titles" | "torrents";
   /** 展示名快照（分类中文名/预设名）；null=全部 */
@@ -145,10 +151,16 @@ export interface SearchHistoryItem {
   poster_mode: boolean;
 }
 
-/** 获取最近的统一搜索历史（按最近搜索时间倒序，同关键词+范围已合并）。 */
-export function listSearchHistory(limit = 10, init?: RequestInit): Promise<SearchHistoryItem[]> {
+/** 获取指定搜索类型的最近关键词组；不指定类型时兼容混合历史。 */
+export function listSearchHistory(
+  limit = 10,
+  vertical?: SearchHistoryItem["vertical"],
+  init?: RequestInit,
+): Promise<SearchHistoryItem[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (vertical) params.set("vertical", vertical);
   return unwrap(
-    request<ApiEnvelope<SearchHistoryItem[]>>(`/search/history?limit=${limit}`, init),
+    request<ApiEnvelope<SearchHistoryItem[]>>(`/search/history?${params}`, init),
   );
 }
 
@@ -157,6 +169,8 @@ export interface TorrentSearchHistoryResults {
   vertical: "torrents";
   history_id: number;
   keyword: string;
+  /** 同搜词快照；null=只搜主词 */
+  also_keywords?: string[] | null;
   label: string | null;
   categories: TorrentCategory[];
   site_ids: string[];
@@ -220,9 +234,10 @@ export function deleteSearchHistoryEntry(id: number): Promise<null> {
   return unwrap(request<ApiEnvelope<null>>(`/search/history/${id}`, { method: "DELETE" }));
 }
 
-/** 清空全部搜索历史。 */
-export function clearSearchHistory(): Promise<null> {
-  return unwrap(request<ApiEnvelope<null>>(`/search/history`, { method: "DELETE" }));
+/** 清空指定搜索类型的历史；不指定类型时清空全部。 */
+export function clearSearchHistory(vertical?: SearchHistoryItem["vertical"]): Promise<null> {
+  const query = vertical ? `?vertical=${vertical}` : "";
+  return unwrap(request<ApiEnvelope<null>>(`/search/history${query}`, { method: "DELETE" }));
 }
 
 /** 资源搜索预设视图：内置分类与自定义站点组合的完整有序列表。 */
@@ -279,14 +294,69 @@ export async function searchTitles(
   };
 }
 
-/** 搜索本地全部可见媒体库中的已入库条目。 */
-export function searchLibraryItems(keyword: string): Promise<LibrarySearchGroup[]> {
-  const query = new URLSearchParams({ keyword });
-  return unwrap(request<ApiEnvelope<LibrarySearchGroup[]>>(`/search/library-items?${query}`));
+/** 命中证据：为什么这条结果会出现（片名/别名/拼音/人物），label 可直接展示。 */
+export interface LibrarySearchMatch {
+  type: string;
+  /** title / original_title / english_title / alias / person_name … */
+  source_field: string;
+  matched_name: string;
+  label: string;
+  /** 经人物命中时为该人物的库内 id */
+  person_id: number | null;
+}
+
+export interface LibrarySearchHit {
+  item: LibraryItem;
+  /** 作品所在的全部可见库（同片跨库只出一条） */
+  library_ids: number[];
+  match: LibrarySearchMatch;
+}
+
+export interface LibrarySearchPerson {
+  /** 库内人物 id */
+  id: number;
+  /** TMDB 影人 id：库内影人页 /people/{id} 的键（旧服务端不返回） */
+  tmdb_person_id: number | null;
+  name: string;
+  avatar_url: string | null;
+  /** 可见库内作品数 */
+  item_count: number;
+  match: LibrarySearchMatch;
+}
+
+/** 搜索联想：从本次结果里提取的片名与人名（不纠错、不按热度），选中即按这个词搜索。
+ *  每条带命中原因，人物带出的作品也会列出（写明是谁）。 */
+export interface LibrarySearchSuggestion {
+  type: "title" | "person";
+  text: string;
+  /** 为什么联想到它（与结果卡片同一份命中原因，如「演员：李一桐」）；旧服务端不返回 */
+  label?: string | null;
+}
+
+export interface LibrarySearchPage {
+  items: LibrarySearchHit[];
+  /** 联想词（仅首页返回） */
+  suggestions: LibrarySearchSuggestion[];
+  /** 命中的人物（仅首页返回；翻页为空） */
+  people: LibrarySearchPerson[];
+  /** 非空表示还有下一页，原样传回 cursor */
+  next_cursor: string | null;
+}
+
+/**
+ * 媒体库搜索：与 iPhone、Apple TV 同一个接口（GET /search/library）。
+ * 结果按相关度排序（准确片名 > 前缀 > 人物带出的作品 > 包含），不按库分组。
+ */
+export function searchLibrary(params: { q: string; cursor?: string }): Promise<LibrarySearchPage> {
+  const query = new URLSearchParams({ q: params.q });
+  if (params.cursor) query.set("cursor", params.cursor);
+  return unwrap(request<ApiEnvelope<LibrarySearchPage>>(`/search/library?${query}`));
 }
 
 export interface SearchParams {
   keyword: string;
+  /** 同搜词：每站与 keyword 一起搜、按种子合并（后端去重、连主词至多 3 个） */
+  also?: string[];
   /** 搜索范围（标签换算而来）；不传等同「全部」 */
   scope?: SearchScope;
   page?: number;
@@ -297,19 +367,20 @@ export interface SearchParams {
  * 单站失败不影响整体，其原因见 `sites[].error`。
  */
 export function searchTorrents(
-  { keyword, scope, page }: SearchParams,
+  { keyword, also, scope, page }: SearchParams,
   init?: RequestInit,
 ): Promise<SearchResponse> {
   return unwrap(
     request<ApiEnvelope<SearchResponse>>(
-      `/search/torrents?${searchParamsOf({ keyword, scope, page })}`,
+      `/search/torrents?${searchParamsOf({ keyword, also, scope, page })}`,
       init,
     ),
   );
 }
 
-function searchParamsOf({ keyword, scope, page }: SearchParams): URLSearchParams {
+function searchParamsOf({ keyword, also, scope, page }: SearchParams): URLSearchParams {
   const params = new URLSearchParams({ keyword });
+  for (const word of also ?? []) params.append("also_keywords", word);
   for (const c of scope?.categories ?? []) params.append("categories", c);
   for (const s of scope?.siteIds ?? []) params.append("sites", s);
   if (scope?.label) params.set("label", scope.label);
@@ -332,6 +403,8 @@ export interface SearchStreamSite {
 /** `start` 事件：宣告本次搜索的范围与参与站点。 */
 export interface SearchStreamStart {
   keyword: string;
+  /** 实际同搜的词（后端清洗去重后），结果页据此写「另含」；只搜主词时为 null */
+  also_keywords?: string[] | null;
   label: string | null;
   categories: TorrentCategory[];
   page: number;

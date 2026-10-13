@@ -14,7 +14,11 @@ from __future__ import annotations
 import asyncio
 import errno
 import itertools
+import re
+import threading
+import time
 from functools import partial
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -125,7 +129,18 @@ def client(tmp_path, monkeypatch):
 _seed_counter = itertools.count(1)
 
 
-async def _seed(tmp_path: Path, *, container="mkv", codec="h264", strm=False) -> int:
+async def _seed(
+    tmp_path: Path,
+    *,
+    container="mkv",
+    codec="h264",
+    strm=False,
+    data: bytes | None = None,
+    duration_seconds: int = 600,
+    hdr: str | None = None,
+    resolution: str = "1080p",
+    strm_url: str = "https://pan.example.com/a.mkv",
+) -> int:
     """建库 + 建条目 + 落一个真实存在的文件，返回 library_file.id。
 
     每次调用建独立的库与文件（名字带序号）——同一用例里要播两部片时，
@@ -136,8 +151,8 @@ async def _seed(tmp_path: Path, *, container="mkv", codec="h264", strm=False) ->
     media_root.mkdir(exist_ok=True)
     name = f"movie{n}.strm" if strm else f"movie{n}.{container}"
     path = media_root / name
-    path.write_text("https://pan.example.com/a.mkv\n") if strm else path.write_bytes(
-        b"FAKE-MEDIA-BYTES" * 64
+    path.write_text(f"{strm_url}\n") if strm else path.write_bytes(
+        data if data is not None else b"FAKE-MEDIA-BYTES" * 64
     )
     async with get_database().session() as session:
         library = await LibraryRepository(session).create(
@@ -155,8 +170,9 @@ async def _seed(tmp_path: Path, *, container="mkv", codec="h264", strm=False) ->
             state=FileState.IN_PLACE,
             container=container,
             video_codec=codec,
-            resolution="1080p",
-            duration_seconds=600,
+            resolution=resolution,
+            hdr=hdr,
+            duration_seconds=duration_seconds,
             audio_streams=[{"codec": "aac", "channels": 2, "default": True}],
         )
         session.add(row)
@@ -454,12 +470,47 @@ def test_direct_play_releases_the_db_connection_before_streaming(client, tmp_pat
 
 
 def test_strm_entry_redirects_to_cloud_url(client, tmp_path):
-    """strm 只允许直连，服务器零流量（硬边界 2）。"""
-    file_id = seed(client, tmp_path, container="strm", strm=True)
-    url = start_session(client, file_id)["stream_url"]
-    resp = client.get(url, follow_redirects=False)
+    """网盘条目能直出时取流 302 到网盘直链，字节不经服务器。"""
+    file_id = seed(client, tmp_path, container="mp4", strm=True)
+    data = start_session(client, file_id)
+    assert data["session_id"] is None
+    resp = client.get(data["stream_url"], follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"] == "https://pan.example.com/a.mkv"
+
+
+def test_unprobed_strm_entry_still_redirects(client, tmp_path):
+    """读不出规格的网盘条目（探测失败）乐观直连，与原来的行为一致。"""
+    file_id = seed(client, tmp_path, container="strm", codec=None, strm=True)
+    data = start_session(client, file_id)
+    assert data["decision"]["tier"] == 0
+    resp = client.get(data["stream_url"], follow_redirects=False)
+    assert resp.status_code == 302
+
+
+def test_probed_strm_mkv_remuxes_from_the_cloud_url(client, tmp_path, monkeypatch):
+    """浏览器认不了的容器：服务端开换封装会话，ffmpeg 直接读网盘直链。"""
+    builds = []
+
+    def capture_build(plan, *, source_path, session_dir, input_options=(), **_kwargs):
+        builds.append((source_path, list(input_options)))
+        playlist = Path(session_dir) / "index.m3u8"
+        return TranscodeCommand(
+            argv=["python3", "-c", FAKE_FFMPEG, str(playlist)],
+            playlist_path=playlist,
+            init_path=Path(session_dir) / "init.mp4",
+        )
+
+    monkeypatch.setattr(session_mod, "build_hls_command", capture_build)
+    # 虚构直链读不出 Cues：走会话相对模式，不去碰网络
+    monkeypatch.setattr(routes_playback, "read_keyframe_index", lambda *_a, **_k: None)
+    file_id = seed(client, tmp_path, container="mkv", strm=True)
+    data = start_session(client, file_id)
+    assert data["decision"]["tier"] == 1, data["decision"]
+    assert data["session_id"]
+    source, options = builds[0]
+    assert source == "https://pan.example.com/a.mkv"
+    assert "-protocol_whitelist" in options
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +596,38 @@ def test_session_lifecycle_playlist_segment_ping_stop(client, tmp_path):
     # 停掉之后 playlist 与心跳都应 404
     assert client.get(data["stream_url"]).status_code == 404
     assert client.post(f"{_PB}/sessions/{session_id}/ping").status_code == 404
+
+
+def test_ping_reports_a_locally_failed_session_so_the_client_steps_down(client, tmp_path):
+    """回归 issue #763：本机转码起步即退出、会话被判死后，心跳要把「失败」告诉客户端，
+    并且 init.mp4 不再每次干等 15 秒——否则播放器对着死会话缓冲好几分钟也不降档。
+    远程 Worker 断线不算本机失败：那是连接问题，照旧交给客户端同档重连。"""
+    file_id = seed(client, tmp_path, container="mkv")
+    data = start_session(client, file_id)
+    session_id = data["session_id"]
+    token = data["stream_url"].split("token=")[1]
+
+    healthy = client.post(f"{_PB}/sessions/{session_id}/ping").json()["data"]
+    assert healthy == {"alive": True, "failed": False, "error": None}
+
+    session = get_session_manager().get(session_id)
+    (session.directory / "init.mp4").unlink(missing_ok=True)
+    session.state = "failed"
+    session.error = "转码进程起步即退出、一段都没产出：Function not implemented"
+    failed = client.post(f"{_PB}/sessions/{session_id}/ping").json()["data"]
+    assert failed["alive"] is True
+    assert failed["failed"] is True
+    assert "Function not implemented" in failed["error"]
+
+    started = time.monotonic()
+    init = client.get(f"{_PB}/sessions/{session_id}/init.mp4?token={token}")
+    assert init.status_code == 404
+    assert time.monotonic() - started < 2.0
+
+    session.remote = True
+    remote = client.post(f"{_PB}/sessions/{session_id}/ping").json()["data"]
+    assert remote["failed"] is False
+    session.remote = False
 
 
 def test_full_decode_client_gets_the_original_file_without_a_session(client, tmp_path):
@@ -803,6 +886,79 @@ def test_quality_switch_releases_remote_worker_before_final_decision(
         assert current.hw_backend == "videotoolbox"
 
 
+def test_reopening_a_tone_mapped_title_frees_its_own_worker_slot_first(
+    client, tmp_path, monkeypatch
+):
+    """杜比视界只能靠远程 Worker 色调映射：换字幕 / 换音轨重开会话时，这位成员自己的旧会话
+    正占着唯一的槽位。不能判成「转码器正忙」把自己挡住（Android TV 实测换 PGS 字幕落错误页），
+    要先让出来再决策。"""
+    from movieclaw_api.services.playback import hwprobe
+    from movieclaw_api.services.playback import plan as plan_mod
+
+    availability = {"value": False}
+    backends = lambda: ("videotoolbox",) if availability["value"] else ()  # noqa: E731
+    monkeypatch.setattr(hwprobe, "available_backends", backends)
+    monkeypatch.setattr(routes_playback, "available_backends", backends)
+    monkeypatch.setattr(routes_playback, "available_local_backends", lambda: ())
+    monkeypatch.setattr(
+        routes_playback, "remote_worker_available", lambda *_a, **_k: availability["value"]
+    )
+    monkeypatch.setattr(plan_mod, "hardware_available", lambda: availability["value"])
+    monkeypatch.setattr(plan_mod, "remote_worker_busy", lambda _b: not availability["value"])
+    monkeypatch.setattr(
+        routes_playback,
+        "effective_remote_transcode_config",
+        lambda: SimpleNamespace(base_url="http://nas.local"),
+    )
+    assert client.put(f"{_PB}/policy", json={"software_transcode_enabled": True}).status_code == 200
+    file_id = seed(
+        client, tmp_path, container="mkv", codec="hevc", hdr="Dolby Vision", resolution="2160p"
+    )
+    manager = get_session_manager()
+    old_id = "old-tonemap-session"
+    old_directory = Path(get_settings().transcode_dir) / old_id
+    old_directory.mkdir(parents=True, exist_ok=True)
+    manager._sessions[old_id] = session_mod.TranscodeSession(
+        id=old_id,
+        file_id=file_id,
+        member_id=0,
+        tier=PlaybackTier.HARDWARE_TRANSCODE,
+        directory=old_directory,
+        start_ms=0,
+        plan=PlaybackPlan(
+            tier=PlaybackTier.HARDWARE_TRANSCODE,
+            file_id=file_id,
+            container="hls-fmp4",
+            video=VideoPlan(action="transcode", codec="h264", height=2160),
+            audio=AudioPlan(action="copy", track_ref=None),
+            reason="测试",
+        ),
+        remote=True,
+    )
+    original_stop_for_file = manager.stop_for_file
+
+    async def stop_and_release(file_id_value: int, member_id: int) -> int:
+        replaced = await original_stop_for_file(file_id_value, member_id)
+        if replaced:
+            availability["value"] = True
+        return replaced
+
+    monkeypatch.setattr(manager, "stop_for_file", stop_and_release)
+
+    async def fake_spawn_remote(remote_session, _base_url: str) -> None:
+        remote_session.state = "ready"
+        remote_session.remote_worker_id = "mac-mini"
+
+    monkeypatch.setattr(manager, "_spawn_remote", fake_spawn_remote)
+
+    # 电视能解 HEVC、显示不了杜比视界：走到「要色调映射」那一道
+    hevc_tv = {**CAPABILITY, "video": [{"codec": "h264"}, {"codec": "hevc"}]}
+    data = start_session(client, file_id, capability=hevc_tv, subtitle_track="embedded:0")
+    assert data["decision"]["outcome"] == "plan", data["decision"]
+    assert data["decision"]["tier"] == int(PlaybackTier.HARDWARE_TRANSCODE)
+    assert manager.get(old_id) is None
+
+
 def test_init_segment_waits_until_fully_written(client, tmp_path, monkeypatch):
     """回归（2026-08-25 真机事故，iPhone 烧录必现「解码失败」）：ffmpeg 起转
     就创建 init.mp4，但 avio 缓冲让它长期 0 字节（实测 ~5 秒，比首个分片还
@@ -874,6 +1030,114 @@ def test_concurrency_limit_returns_503_with_chinese_message(client, tmp_path, mo
     message = resp.json()["message"]
     assert "上限" in message or "已满" in message
     assert "1/1" in message  # 告诉用户当前占用，而不是干巴巴一句「满了」
+
+
+def test_disc_image_session_is_planned_on_the_main_title_duration(client, tmp_path, monkeypatch):
+    """光盘镜像起播：ffmpeg 经 subfile 读镜像上的正片区间；分片按盘内主播放列表的片长排，
+    不按台账（ffprobe 对整个镜像估的，NAS 实测一集 DVD 记成 4 秒，开播几秒就弹「下一集」）。"""
+    from tests.api.test_iso_source import _bluray_image
+
+    calls: list[dict] = []
+
+    def fake_build(plan, *, source_path, session_dir, **kw):
+        calls.append({"source_path": source_path, **kw})
+        playlist = Path(session_dir) / "index.m3u8"
+        return TranscodeCommand(
+            argv=["python3", "-c", FAKE_FFMPEG, str(playlist)],
+            playlist_path=playlist,
+            init_path=Path(session_dir) / "init.mp4",
+        )
+
+    monkeypatch.setattr(session_mod, "build_hls_command", fake_build)
+    image, _, _ = _bluray_image(metadata=False)
+    file_id = seed(client, tmp_path, container="iso", data=image, duration_seconds=4)
+    data = start_session(client, file_id)
+    assert data["decision"]["tier"] == 1, data["decision"]
+    call = calls[-1]
+    assert call.get("input_format") == "concat"
+    assert call.get("protocol_whitelist") == "file,subfile,concat"
+    assert "file 'subfile,,start," in Path(call["source_path"]).read_text(encoding="utf-8")
+    (session,) = session_mod.get_session_manager().active()
+    assert session.segment_plan is not None
+    assert session.segment_plan.duration_s == pytest.approx(900)
+
+
+def test_stored_disc_image_durations_are_healed_from_the_main_title(client, tmp_path):
+    """存量 ISO 的台账片长（ffprobe 对镜像估的）换成盘内正片时长：它是「看到哪算看完」的
+    分母，记成 4 秒的那集一开播就被判成看完。读不出盘内结构的镜像保持原样。"""
+    from tests.api.test_iso_source import _bluray_image
+
+    from movieclaw_api.services.library.disc_image_durations import heal_disc_image_durations
+    from movieclaw_api.services.playback import iso_source
+
+    iso_source.clear_cache()
+    image, _, _ = _bluray_image(metadata=False)
+    wrong = seed(client, tmp_path, container="iso", data=image, duration_seconds=4)
+    unreadable = seed(client, tmp_path, container="iso", duration_seconds=4)
+
+    assert client.portal.call(heal_disc_image_durations) == 1
+    assert client.portal.call(heal_disc_image_durations) == 0  # 幂等：校准过的不再改
+
+    async def durations():
+        async with get_database().session() as session:
+            rows = [await session.get(LibraryFile, i) for i in (wrong, unreadable)]
+            return [row.duration_seconds for row in rows]
+
+    assert client.portal.call(durations) == [900, 4]
+
+
+def test_stored_dolby_vision_files_get_their_profile_backfilled(client, tmp_path, monkeypatch):
+    """dv_profile 是后加的列：存量杜比视界文件启动后补记（只读文件头），读不出的留空、不乱填"""
+    from movieclaw_api.services.library import dolby_vision_backfill as backfill
+    from movieclaw_api.services.media_probe import VideoColor
+
+    p5 = seed(client, tmp_path, codec="hevc", hdr="Dolby Vision")
+    unreadable = seed(client, tmp_path, codec="hevc", hdr="Dolby Vision")
+    sdr = seed(client, tmp_path, codec="hevc")
+    probed: list[str] = []
+
+    def fake_color(path, *, fallback_hdr=None):
+        # 按 id 顺序读：第一个是 P5，第二个读不出 DOVI 配置记录
+        probed.append(str(path))
+        if len(probed) == 1:
+            return VideoColor(hdr="Dolby Vision", dv_profile=5, dv_backward_compatible=False)
+        return VideoColor(hdr=fallback_hdr)
+
+    monkeypatch.setattr(backfill, "video_color_for", fake_color)
+    assert client.portal.call(backfill.backfill_dolby_vision_profiles) == 1
+    assert len(probed) == 2  # SDR 文件不读
+
+    async def profiles():
+        async with get_database().session() as session:
+            rows = [await session.get(LibraryFile, i) for i in (p5, unreadable, sdr)]
+            return [(row.dv_profile, row.dv_bl_compatible) for row in rows]
+
+    assert client.portal.call(profiles) == [(5, False), (None, None), (None, None)]
+
+
+def test_tv_app_starting_another_file_frees_its_stale_session(client, tmp_path, monkeypatch):
+    """电视被强杀没来得及结束播放：同一台电视开下一部片时旧会话当场让出名额，
+    不会被「已满」挡住（浏览器可以多开标签页，见上一条，不这么处理）。"""
+    monkeypatch.setattr(routes_playback, "MAX_REMUX_CONCURRENCY", 1)
+    ids = [seed(client, tmp_path, container="mkv") for _ in range(2)]
+    grant = client.post(
+        "/api/v1/auth/device/authorize",
+        json={"client_type": "androidtv", "client_name": "客厅 BRAVIA"},
+    ).json()["data"]
+    approved = client.post(f"/api/v1/auth/devices/requests/{grant['user_code']}/approve")
+    assert approved.status_code == 200, approved.text
+    token = client.post(
+        "/api/v1/auth/device/token", json={"device_code": grant["device_code"]}
+    ).json()["data"]["token"]
+    tv = {"Authorization": f"Bearer {token}"}
+    client.cookies.clear()  # 之后以电视的身份请求（Cookie 优先于 Bearer）
+
+    for file_id in ids:
+        resp = client.post(
+            f"{_PB}/sessions", json={"file_id": file_id, "capability": CAPABILITY}, headers=tv
+        )
+        assert resp.status_code == 200, resp.text
+    assert [s.file_id for s in session_mod.get_session_manager().active()] == [ids[1]]
 
 
 def test_low_disk_space_returns_503(client, tmp_path, monkeypatch):
@@ -1099,6 +1363,122 @@ def test_remote_source_supports_range_without_mounting_nas(client, tmp_path):
     assert response.status_code == 206
     assert response.content == b"FAKE-MEDIA-BYTES"
     assert response.headers["accept-ranges"] == "bytes"
+
+
+def test_remote_source_redirects_strm_to_the_cloud_url(client, tmp_path):
+    """网盘条目交给远程 Worker 时，取源跳转到网盘直链：Worker 直接从网盘取，不经 NAS。"""
+    file_id = seed(client, tmp_path, container="mkv", strm=True)
+    grants = _install_remote_session(client, tmp_path, file_id)
+    response = client.get(
+        f"/api/v1/transcode-worker/sessions/{grants['session_id']}/source"
+        f"?token={grants['source']}",
+        headers={"Range": "bytes=0-15"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert response.headers["location"] == "https://pan.example.com/a.mkv"
+
+
+# ---------------------------------------------------------------------------
+# 内网直链由服务端转发（streaming.strm_needs_relay）
+# ---------------------------------------------------------------------------
+
+_LAN_BYTES = bytes(range(256)) * 64
+
+
+@pytest.fixture
+def lan_drive():
+    """回环地址上的仿网盘：只认 Range，``/missing`` 回 404。"""
+    seen: list[tuple[str, str | None]] = []
+    agents: list[str | None] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            seen.append((self.path, self.headers.get("Range")))
+            agents.append(self.headers.get("User-Agent"))
+            if self.path.startswith("/missing"):
+                self.send_error(404)
+                return
+            match = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range") or "")
+            start = int(match.group(1)) if match else 0
+            end = int(match.group(2)) if match and match.group(2) else len(_LAN_BYTES) - 1
+            body = _LAN_BYTES[start : end + 1]
+            self.send_response(206 if match else 200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Accept-Ranges", "bytes")
+            if match:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(_LAN_BYTES)}")
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}", seen=seen, agents=agents)
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("url", "relay"),
+    [
+        ("http://127.0.0.1:5244/d/a.mkv", True),
+        ("http://192.168.1.10:5244/d/a.mkv", True),
+        ("http://alist:5244/d/a.mkv", True),
+        ("http://nas.local/d/a.mkv", True),
+        ("http://100.101.102.103/d/a.mkv", True),
+        ("http://[::1]:5244/d/a.mkv", True),
+        ("https://pan.example.com/a.mkv", False),
+        ("https://8.8.8.8/a.mkv", False),
+        ("rtsp://192.168.1.10/live", False),
+    ],
+)
+def test_relay_rule_only_targets_addresses_players_cannot_reach(url, relay):
+    from movieclaw_playback.streaming import strm_needs_relay
+
+    assert strm_needs_relay(url) is relay
+
+
+def test_lan_strm_is_relayed_with_range(client, tmp_path, lan_drive):
+    """回环 / 内网直链不 302（播放器连不上），服务端按 Range 原样转发；上游 404 透传。"""
+    lan = f"{lan_drive.url}/d/a.mp4"
+    file_id = seed(client, tmp_path, container="mp4", strm=True, strm_url=lan)
+    url = start_session(client, file_id)["stream_url"]
+    resp = client.get(url, headers={"Range": "bytes=100-199"}, follow_redirects=False)
+    assert resp.status_code == 206
+    assert resp.content == _LAN_BYTES[100:200]
+    assert resp.headers["content-range"] == f"bytes 100-199/{len(_LAN_BYTES)}"
+    assert lan_drive.seen[-1] == ("/d/a.mp4", "bytes=100-199")
+
+    gone = seed(client, tmp_path, container="mp4", strm=True, strm_url=f"{lan_drive.url}/missing")
+    assert client.get(start_session(client, gone)["stream_url"]).status_code == 404
+
+
+def test_strm_request_headers_are_forwarded_by_the_relay(client, tmp_path, lan_drive):
+    """strm 里写了 User-Agent：一律服务端转发，上游收到的是 strm 指定的头。"""
+    lan = f"{lan_drive.url}/d/a.mp4|User-Agent=115Browser%2F27"
+    file_id = seed(client, tmp_path, container="mp4", strm=True, strm_url=lan)
+    resp = client.get(start_session(client, file_id)["stream_url"], headers={"Range": "bytes=0-9"})
+    assert resp.status_code == 206 and resp.content == _LAN_BYTES[:10]
+    assert lan_drive.agents[-1] == "115Browser/27"
+
+
+def test_remote_worker_source_relays_lan_strm(client, tmp_path, lan_drive):
+    """回环直链在 Worker 那台机器上不是同一个地址：NAS 转发，不 302。"""
+    lan = f"{lan_drive.url}/d/a.mkv"
+    file_id = seed(client, tmp_path, container="mkv", strm=True, strm_url=lan)
+    grants = _install_remote_session(client, tmp_path, file_id)
+    response = client.get(
+        f"/api/v1/transcode-worker/sessions/{grants['session_id']}/source"
+        f"?token={grants['source']}",
+        headers={"Range": "bytes=0-15"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 206
+    assert response.content == _LAN_BYTES[:16]
 
 
 def test_remote_disc_source_is_an_ffconcat_of_clip_urls(client, tmp_path):
@@ -1975,6 +2355,8 @@ async def test_partial_segment_response_follows_growth_until_complete(tmp_path):
     headers = dict(sent[0]["headers"])
     assert b"content-length" not in headers, "长度未知，必须分块传输"
     assert headers[b"cache-control"] == b"no-store"
+    assert headers[b"x-movieclaw-partial-segment"] == b"1"
+    assert headers[b"x-accel-buffering"] == b"no"
     bodies = [m for m in sent if m["type"] == "http.response.body"]
     assert b"".join(m["body"] for m in bodies) == b"FRAG1FRAG2"
     assert bodies[-1]["more_body"] is False
@@ -2024,8 +2406,8 @@ def test_whole_segment_upload_supersedes_a_half_written_partial(client, tmp_path
     assert not (directory / ".seg00003.m4s.partial").exists()
 
 
-def test_only_avfoundation_clients_get_partial_segments():
-    """边产出边送的半截分片只给 AVFoundation（原生 HLS、没有 MSE）；hls.js 照旧等整段。"""
+def test_only_streaming_clients_get_partial_segments():
+    """AVFoundation 或显式声明渐进解码的网页才能取半成品；普通 XHR 仍等整段。"""
     from movieclaw_api.schemas.playback import ClientCapabilityIn
 
     ios = ClientCapabilityIn(native_hls=True, mse="none")
@@ -2035,10 +2417,36 @@ def test_only_avfoundation_clients_get_partial_segments():
     assert not routes_playback._capability_consumes_partial_segments(web)
     assert not routes_playback._capability_consumes_partial_segments(safari_mse)
 
-    def request(user_agent: str) -> Request:
-        return Request({"type": "http", "headers": [(b"user-agent", user_agent.encode())]})
+    def request(user_agent: str, query: bytes = b"") -> Request:
+        return Request({
+            "type": "http", "headers": [(b"user-agent", user_agent.encode())],
+            "query_string": query,
+        })
 
     avplayer = "AppleCoreMedia/1.0.0.23A341 (iPhone; U; CPU OS 26_0 like Mac OS X; zh_cn)"
     chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0"
     assert routes_playback._consumes_partial_segments(request(avplayer))
     assert not routes_playback._consumes_partial_segments(request(chrome))
+    assert routes_playback._consumes_partial_segments(request(chrome, b"partial=1"))
+    assert not routes_playback._consumes_partial_segments(request(chrome, b"partial=0"))
+
+
+def test_diagnostic_encoder_marks_vaapi_low_power():
+    """诊断面板要看得出 VAAPI 用的是不是低功耗编码：同一块核显两种模式表现可能
+    天差地别（issue #763），排查时第一眼就要知道。"""
+    from movieclaw_api.services.playback.ffmpeg_args import (
+        VAAPI_LOW_POWER,
+        register_encoder_options,
+    )
+    from movieclaw_playback.decide import VideoPlan
+
+    session = SimpleNamespace(
+        plan=SimpleNamespace(video=VideoPlan(action="transcode", codec="h264")),
+        hw_backend="vaapi",
+    )
+    assert routes_playback._diagnostic_encoder(session) == "h264_vaapi"
+    register_encoder_options("vaapi", VAAPI_LOW_POWER)
+    try:
+        assert routes_playback._diagnostic_encoder(session) == "h264_vaapi（低功耗）"
+    finally:
+        register_encoder_options("vaapi", ())

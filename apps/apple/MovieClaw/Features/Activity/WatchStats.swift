@@ -149,12 +149,12 @@ struct WatchStatsPanel: View {
         }
         let tierTotal = Double(stats.byTier.reduce(0) { $0 + $1.plays })
         BreakdownPanel(
-            title: "按播放方式", note: "仅网页播放；Jellyfin 客户端恒为直连",
+            title: "按播放方式", note: "仅 MovieClaw 网页与 App 播放；Jellyfin 客户端恒为直连",
             total: tierTotal, unit: "种", formatValue: { "\(Int($0)) 场" },
             rows: stats.byTier.map { row in
                 BreakdownRow(key: "\(row.tier)", label: Text(row.label), value: Double(row.plays), valueLabel: "\(row.plays) 场")
             },
-            emptyText: "本周期没有网页播放；Jellyfin 客户端不经过转码，不在这里分解"
+            emptyText: "本周期没有 MovieClaw 网页与 App 播放；Jellyfin 客户端不经过转码，不在这里分解"
         )
     }
 }
@@ -688,7 +688,8 @@ private struct FavoritePodium: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background {
                 ZStack {
-                    RemoteImage(url: api.image(favorites[0].media.posterUrl, .posterCard))
+                    // 放大模糊铺底，看不出清晰度：取一张小图就够
+                    RemoteImage(url: api.image(favorites[0].media.posterUrl, width: ImageWidth.points(120)))
                         .scaleEffect(1.5)
                         .blur(radius: 40)
                         .saturation(1.5)

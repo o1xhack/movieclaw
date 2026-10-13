@@ -1,6 +1,6 @@
 ---
 name: release
-description: 发布 movieclaw 新版本。当用户要求发版、发布新版本、打 tag、发布 NER 模型、发布 Docker 镜像，或打包上传 iOS App 到 TestFlight / App Store、补传发版附件（IPA、Mac 转码器）时使用。涵盖版本号三处同步、应用/模型/镜像/iOS 的完整流程、可选附件失败补救与检查清单。
+description: 发布 movieclaw 新版本。当用户要求发版、发布新版本、打 tag、发布 NER 模型、发布 Docker 镜像，或打包上传 iOS App 到 TestFlight / App Store、补传发版附件（IPA、Mac 转码器、Mac 版 App）时使用。涵盖版本号三处同步、应用/模型/镜像/iOS 的完整流程、可选附件失败补救与检查清单。
 ---
 
 # movieclaw 发布规范
@@ -47,13 +47,18 @@ description: 发布 movieclaw 新版本。当用户要求发版、发布新版�
 4. release.yml 两段式发布（draft → publish）：先以 draft 创建 Release，
    各作业往上传产物——应用三件套（app-web.tar.gz / app-backend.tar.gz /
    manifest.json，可选 manifest.json.sig）、mclaw 六平台归档 + checksums、
-   macOS Worker zip 与 iOS 未签名 IPA（均为可选附件）——同时发布多架构 Docker 镜像到 Docker Hub
+   Android 正式签名 APK 与版本 JSON（必需）、macOS Worker zip、iOS 未签名 IPA 与 Mac 版 App zip
+   （后三者为可选附件）——同时发布多架构 Docker 镜像到 Docker Hub
    （movieclaw/movieclaw，正式版打 vX.Y.Z + runtime-N + latest，
    预发布版只打 vX.Y.Z-… 不动 latest）。最后 publish 作业校验产物齐全、
    镜像发布成功后把 draft 转正；此前 Release 对应用内更新和
    install-cli.sh 都不可见。**任何作业失败时 Release 停在 draft，
    修复后到 Actions 重跑整个 release 工作流即可**（上传均带 --clobber，
-   安全重入）；仅 Worker / IPA 挂了不拦转正，重跑 worker-macos / ios-ipa 作业补传即可。
+   安全重入）；仅 Worker / IPA / Mac 版挂了不拦转正，重跑 worker-macos / ios-ipa / mac-app 作业补传即可。
+   Worker、IPA、Mac 与 Android 按改动判断：自上一版以来对应代码没变时不重编。
+   前三者由 `carry-assets` 沿用；Android 由 `android-apk` 同时沿用 APK 与 JSON，
+   该作业失败会阻止 Release 转正（规则见 `scripts/release-asset-plan.sh`）。证书、公证配置
+   或打包流程变了而代码没变时，到 Actions → release 手动 Run workflow 勾选 `force_rebuild`
 5. changelog：写 docs/changelog/vX.Y.Z.md 合入 main。changelog 先于发版
    合入（推荐，可与发版 PR 同 PR）时，release.yml 建 Release 会直接用它
    当 body；后合入也没关系，release-notes.yml 会自动同步为 Release body
@@ -166,29 +171,45 @@ ffmpeg 版本，发版前按下表逐项过一遍。
    （`security set-key-partition-list …`，要输 Mac 登录密码），否则会弹出几十个授权框。
 2. 从 main 打包上传：`source <本机 env> && apps/apple/scripts/release.sh --upload`
    （不带 `--upload` 只导出，用于先验证签名）。构建号取 UTC 时间自动递增。
+   Apple TV 版加 `--tv`、Mac 版加 `--mac`（同一条 App 记录、各自一条构建序列），几端都要发就各跑一次。
+   TestFlight 的审核账号、备注与「Beta 版 App 描述」三端共用，提审前按 `docs/design/ios-release.md` §4 核对；
+   各端的「测试内容」只写那一端真有的功能。
 3. 上传后 5～30 分钟处理完；可用 ASC API 查 `processingState` / `buildAudienceType`。
    开了自动分发的内部测试组会自动收到；对外测试组按 checklist §5 加构建、提审。
 4. 看 Apple 邮件：ITMS-91053 等警告按邮件补隐私清单。
 
-## 七、可选附件失败的补救（worker-macos / ios-ipa）
+## 七、可选附件失败的补救（worker-macos / ios-ipa / mac-app / carry-assets）
 
-publish 作业不等它们，Release 会照常转正——但 changelog 若写了这些附件就必须补上。
+官网版本通过 Release 附件 `downloads.json` 自动同步，规则见 `docs/design/download-manifest.md`。
+正常发布与补跑作业会自动刷新；人工补传 Mac ZIP 后，在 macOS 上运行
+`bash scripts/publish-download-manifest.sh vX.Y.Z`。它从实际包读取版本和芯片，沿用旧包时保留包内版本。
+
+publish 作业等待它们结束，但可选附件失败不会阻止转正——changelog 若写了这些附件就必须补上。
 GitHub 只允许整次运行结束后再单独重跑某个作业（`gh run rerun --job <id>`）。
 
 - **ios-ipa 编译失败**：多半是 CI 的 Xcode 比本机旧（见 ios-release.md §5）。先在本机
   `git checkout vX.Y.Z` 后跑 `apps/apple/scripts/build-unsigned-ipa.sh`，再
   `gh release upload vX.Y.Z apps/apple/build-ipa/MovieClaw-iOS-unsigned.ipa --clobber` 补传，
   然后开 PR 修 CI 兼容（PR 上的 `ios` 检查能复现）。
+- **mac-app 编译失败**：同上，多半是 CI 的 Xcode 比本机旧（PR 上 `ios` 工作流的 mac 作业能复现）。本机
+  `git checkout vX.Y.Z` 后跑 `MOVIECLAW_SIGNING_IDENTITY="Developer ID Application: …" MOVIECLAW_NOTARY_PROFILE=<凭证名>
+  apps/apple/scripts/package-mac-app.sh`（签名、公证、打包一条龙），再
+  `gh release upload vX.Y.Z apps/apple/build-macapp/MovieClaw-macos-arm64.zip --clobber` 补传。
+  公证失败时脚本会打出 Apple 的逐条拒绝原因；密钥类报错同下面 worker-macos。
 - **worker-macos 公证失败**，按报错对仓库密钥：
   - `--issuer … must be a valid UUID` → `APPLE_API_ISSUER_ID` 值不对（常见多带空格 / 换行）
   - `HTTP status code: 401` → `APPLE_API_KEY_ID` 与 `APPLE_API_KEY_P8` 不是同一把，或密钥已撤销
   - 「没有 Developer ID Application 证书」→ `.p12` 导出的是别的证书
   `.p8` / `.p12` 属于凭证，由账号持有人自己 `gh secret set`（从本机文件重定向输入，不经聊天）。
-  改好后单独重跑 worker-macos；可下载产物本机 `spctl -a -vv` 看到 `Notarized Developer ID` 即成功。
+  改好后单独重跑 worker-macos（mac-app 用同一套密钥，一并重跑）；可下载产物本机 `spctl -a -vv`
+  看到 `Notarized Developer ID` 即成功。
 
 ## 八、发版检查清单
 
 - [ ] 版本号三处一致（应用发版）
+- [ ] Android 有变化时，已递增 `apps/android/version.properties` 的版本与版本码；
+      `android-apk` 成功、正式签名 APK / JSON 在场（详见下节）
+- [ ] Android TV 有变化时，已递增 `apps/android-tv/version.properties`；`android-tv-apk` 结果看一眼（可选附件，失败只告警）
 - [ ] bump 版本号后已跑 `scripts/export-spec.sh`（服务端与 Go CLI 两份 spec）
 - [ ] 本次改动是否触碰运行时依赖？触碰了 → `docker/runtime-version` +1（镜像随发版自动发布）
 - [ ] 改了 Worker 握手协议（`REMOTE_WORKER_PROTOCOL_VERSION` 与 macOS Worker
@@ -197,12 +218,39 @@ GitHub 只允许整次运行结束后再单独重跑某个作业（`gh run rerun
       （按 Worker 自报能力派发）时，同样要在提示框里写明「请下载新版转码器」
 - [ ] 数据库迁移向前兼容（alembic 迁移是单向的，用户回退靠自动备份）
 - [ ] Release 产物齐全：publish 作业已自动校验（应用三件套 + mclaw 六平台
-      归档 `mclaw_{linux,darwin}_{amd64,arm64}.tar.gz`、
-      `mclaw_windows_{amd64,arm64}.zip`、`checksums.txt`，启用签名时含
+      归档 `mclaw_cli_{linux,darwin}_{amd64,arm64}.tar.gz`、
+      `mclaw_cli_windows_{amd64,arm64}.zip`、`checksums.txt`，启用签名时含
       `.sig`），人工只需确认 release 工作流全绿、Release 已从 draft 转正；
       worker-macos 作业红了 → Worker zip 缺失，重跑该作业补传；
-      ios-ipa 作业红了 → `MovieClaw-iOS-unsigned.ipa` 缺失，重跑该作业补传
+      ios-ipa 作业红了 → `MovieClaw-iOS-unsigned.ipa` 缺失，重跑该作业补传；
+      mac-app 作业红了 → `MovieClaw-macos-arm64.zip` 缺失，重跑该作业补传；
+      carry-assets 作业红了 → 沿用的附件缺失，重跑该作业补传
+- [ ] `downloads.json` 与 Mac ZIP 一致；人工补传 ZIP 后已刷新清单，官网能显示包内版本及对应芯片
 - [ ] changelog 已写入 `docs/changelog/vX.Y.Z.md` 并合入 main（release-notes.yml
       自动同步为 Release body，应用内更新界面会原文展示给用户），并按
       `changelog-guide.md` 自检过第一屏
 - [ ] 改动了播放/转码 → 第五节的硬件矩阵人工验收已过（CI 覆盖不到）
+
+## 九、Android APK（独立版本，随服务器 Release 分发）
+
+版本与流水线作业全景见 `docs/design/android-release.md`。Android 手机/平板独立维护
+`apps/android/version.properties` 中的 `versionName` 和递增 `versionCode`，不跟服务器 tag
+或 Apple 的版本号同步；Android 变化发新版时两者一起递增。未来 TV 等独立客户端分别维护
+applicationId、版本与附件，不预先把尚未实现的产品混入同一版本。
+
+`android-apk` 作业自动构建或沿用 `MovieClaw-Android-arm64.apk` 及同名 `.json`。
+正式构建要求完整原生播放器依赖和固定签名证书，禁止用 debug 证书替代；所需 Secrets：
+`ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。
+已有官方签名密钥必须沿用，不能因构建失败而重新生成；密钥不入 git、不贴聊天。
+
+本地验证：配置签名环境变量后运行 `bash apps/android/scripts/package-release.sh`，
+再运行 `python3 -m unittest discover -s scripts/tests`。PR 的 Android 检查使用临时测试证书，
+正式证书只交给 release 工作流。APK 元数据由 `aapt2` / `apksigner` 从包内读取，
+汇入 `downloads.json` 前校验大小与 SHA-256。
+
+固定下载地址：`https://github.com/movieclaw/MovieClaw/releases/latest/download/MovieClaw-Android-arm64.apk`。
+APK 是必需附件，缺失时 `publish` 不转正；失败后修复并重跑工作流，不以无签名包或 Exo-only 包绕过。
+
+Android TV：`android-tv-apk` 作业构建或沿用 `MovieClaw-AndroidTV.apk` / `.json`，版本独立
+（`apps/android-tv/version.properties`），签名复用上面同一组 Secrets；目前是可选附件。详见
+`docs/design/android-release.md`「Android TV」。

@@ -37,10 +37,12 @@ import { useSubscribeEntry } from "@/components/subscribe-entry";
 import { useBackNavigation } from "@/lib/back-navigation";
 import { useBackdrop } from "@/lib/backdrop";
 import { buildDiscoveryReturnPath } from "@/lib/discovery-return-path";
+import { scopeOfMediaKind } from "@/lib/categories";
+import { buildSearchPath, titleSearchAlso } from "@/lib/search-url";
 import { useDoubanAppHref } from "@/lib/douban-app-link";
-import { upgradedTmdbOriginalUrl } from "@/lib/image-proxy";
+import { IMAGE_ASPECT, tmdbImageForWidth, tmdbTierWidth, withImageWidth } from "@/lib/image-proxy";
 import { useResolvedTheme } from "@/themes/registry";
-import { useWantsOriginalImage } from "@/lib/image-resolution";
+import { useDetailHeroImageWidth } from "@/lib/image-resolution";
 import { useHeroEdgeColor } from "@/lib/hero-edge-color";
 import { getMediaSeed } from "@/lib/media-detail";
 import { useTapGuard } from "@/lib/use-tap-guard";
@@ -110,7 +112,7 @@ export function MediaDetailView({
   const listItem = getMediaSeed(source, id);
   const fallbackType = listItem?.type ?? type ?? "movie";
   const navFallback = {
-    label: fallbackType === "tv" ? "发现剧集" : "发现电影",
+    label: "发现",
     href: `/discover/${fallbackType}` as Route,
   };
   const back = useBackNavigation(navFallback.href);
@@ -149,20 +151,30 @@ export function MediaDetailView({
   // 取源与全站背景**分开**（见下方 mobileHeroSrc），豆瓣条目因此照常有 Hero。
   const { setOverrideBackdrop } = useBackdrop();
   // 沉浸背景只走高清：TMDB 的 original 地址是确定性的（w1280 同图换尺寸段，
-  // 见 upgradedTmdbOriginalUrl），进入页面即刻推导并预加载，加载**并解码**完成
+  // 见 tmdbImageForWidth），进入页面即刻推导并预加载，加载**并解码**完成
   // 才显示——不存在「先低清后高清」的换图过程，也就没有换图带来的突兀/闪烁。
-  // 低清 w1280 只作兜底：非 TMDB 图（无更高档位，地址原样返回）或高清加载
-  // 失败时才显示。没有横幅剧照时退回海报。
-  // 小物理宽屏（≤1280，全部手机）不算「高清失守」而是「无需高清」：393px×3
-  // 倍屏物理宽 1179，w1280 已饱和，按 useWantsOriginalImage 门槛把 hdUrl 置空
-  // 直接走兜底档，不为看不见的清晰度多拉 1~3MB 原图。
-  const wantsOriginal = useWantsOriginalImage();
-  const fallbackBackdrop = item?.backdropUrl || item?.posterUrl || "";
+  // 低清 w1280 只作兜底：非 TMDB 图（无更高档位）或高清加载失败时才显示。
+  // 没有横幅剧照时退回海报。
+  // 取多大按公式算（lib/image-resolution.ts）：桌面按整窗铺满，手机按页内 Hero 框
+  // 铺满（竖框要按高算）。需要的宽度没超过列表档（w1280）就不算「高清失守」而是
+  // 「无需高清」：hdUrl 置空直接走兜底档，不为看不见的清晰度多拉原图。
+  // 两档都带 w：服务端从原图派生到那一档，不传 3840 宽的原图。
+  const isMobile = useIsMobile();
+  const fallbackRaw = item?.backdropUrl || item?.posterUrl || "";
+  const backdropWidth = useDetailHeroImageWidth(
+    isMobile,
+    item?.backdropUrl ? IMAGE_ASPECT.backdrop : IMAGE_ASPECT.poster,
+  );
+  const fallbackBackdrop = fallbackRaw && backdropWidth ? withImageWidth(fallbackRaw, backdropWidth) : "";
+  const wantsOriginal = backdropWidth > (tmdbTierWidth(fallbackRaw) ?? 1280);
   const hdUrl =
     source === "douban" || !wantsOriginal
       ? undefined
-      : (detail?.backdropOriginalUrl ??
-        (fallbackBackdrop ? upgradedTmdbOriginalUrl(fallbackBackdrop) : undefined));
+      : detail?.backdropOriginalUrl
+        ? withImageWidth(detail.backdropOriginalUrl, backdropWidth)
+        : fallbackRaw
+          ? tmdbImageForWidth(fallbackRaw, backdropWidth)
+          : undefined;
   const [hdState, setHdState] = useState<"pending" | "ok" | "failed">("pending");
   useEffect(() => {
     if (!hdUrl) {
@@ -238,7 +250,6 @@ export function MediaDetailView({
   // chevron（见 NetflixBackButton）。移动端仍保留 PageNav：它要向外壳登记
   // 「本页自带顶栏」并充当返回入口（见 app-shell）。
   // 这些 hook 必须无条件调用（短路写法会触发 rules-of-hooks）。
-  const isMobile = useIsMobile();
   const isNf = useTheme().structural;
   const isNfDesktop = isNf && !isMobile;
   const { slots } = useResolvedTheme();
@@ -391,10 +402,11 @@ export function MediaDetailView({
       {/* 背景轮换：Netflix 桌面且剧照多于一张时，按序叠变（见组件说明）。
           首帧传主 backdrop 原图——与覆盖层当前显示的是同一张照片，轮换层
           淡入接管时没有构图/内容跳变。 */}
-      {isNfDesktop && detail && detail.backdrops.length > 1 && (
+      {isNfDesktop && detail && detail.backdrops.length > 1 && backdropWidth > 0 && (
         <DetailBackdropSlideshow
-          images={detail.backdrops}
-          initialUrl={detail.backdropOriginalUrl ?? detail.backdrops[0]?.fullUrl}
+          // 轮换层同样铺满整窗，与覆盖层取同一档宽度（首帧因此与覆盖层是同一个地址）
+          images={detail.backdrops.map((img) => ({ ...img, fullUrl: withImageWidth(img.fullUrl, backdropWidth) }))}
+          initialUrl={withImageWidth(detail.backdropOriginalUrl ?? detail.backdrops[0]?.fullUrl ?? "", backdropWidth) || undefined}
           pushAnchor={kbAnchorRef.current}
         />
       )}
@@ -548,15 +560,21 @@ export function MediaDetailView({
                 <button
                   type="button"
                   onClick={openSubscribe}
-                  className={`btn-accent flex h-10 items-center gap-2 rounded-full px-5 text-ui font-semibold ${actionSize}`}
+                  className={`btn-accent media-cta flex h-10 items-center gap-2 rounded-full px-5 text-ui font-semibold ${actionSize}`}
                 >
                   <BellIcon className="size-4" />
                   订阅追踪
                 </button>
               ))}
-              {/* 搜索资源：不订阅、只想手动找种子下一次的直达口（此前只能回 ⌘K 重打片名） */}
+              {/* 搜索资源：不订阅、只想手动找种子下一次的直达口（此前只能回 ⌘K 重打片名）；
+                  按影片类型收窄到剧集/电影分类，免得同名的另一类资源混进来；
+                  英文名/原名一起搜（同订阅），只认英文名的站点也能搜到 */}
               {showSearchButton && <Link
-                href={`/search?q=${encodeURIComponent(item.title)}` as Route}
+                href={buildSearchPath({
+                  keyword: item.title,
+                  also: titleSearchAlso(detail?.info.englishTitle, item.originalTitle),
+                  scope: scopeOfMediaKind(item.type),
+                }) as Route}
                 className={`btn-glass flex h-10 items-center gap-2 bg-white/10 px-5 text-ui font-medium backdrop-blur-md transition hover:bg-white/15 ${actionSize}`}
               >
                 <SearchIcon className="size-4" />
@@ -761,7 +779,7 @@ function TrailerRow({ title, videos }: { title: string; videos: MediaVideo[] }) 
         预告片
       </h2>
 
-      <HScroller className="-mx-1 gap-3 px-1 pb-1 pt-1">
+      <HScroller className="-mx-1 gap-3 px-1 pt-1.5 pb-1">
         {videos.map((video) => (
           <TrailerCard key={video.key} video={video} title={title} onPlay={() => setPlaying(video)} />
         ))}
@@ -798,6 +816,8 @@ function TrailerCard({
         {/* YouTube 封面是 4:3（上下带黑边），object-cover 裁进 16:9 恰好只剩画面 */}
         <PosterImage
           src={video.thumbnailUrl}
+          width={264}
+          zoom={1.05}
           alt={`${title} ${video.kind}`}
           className="size-full object-cover transition-transform duration-500 ease-out group-hover/trailer:scale-[1.05]"
         />
@@ -1044,7 +1064,7 @@ function PhotoWall({
           onScroll={updateEdges}
           // overscroll-x-contain：滑到行的尽头后不把剩余动量甩给外层纵向滚动
           // （同 HScroller 的处理，触屏上「滑到头带动整页跳一下」即由此而来）
-          className="scroll-none -mx-1 flex gap-3 overflow-x-auto overscroll-x-contain px-1 pb-1 pt-1"
+          className="scroll-none -mx-1 flex gap-3 overflow-x-auto overscroll-x-contain px-1 pt-1.5 pb-1"
         >
           {active.images.map((img, i) => (
             <PhotoCard
@@ -1066,6 +1086,7 @@ function PhotoWall({
       {lightboxIndex !== null && (
         <ImageLightbox
           images={active.images.map((img) => img.fullUrl)}
+          sizeable
           initialIndex={lightboxIndex}
           title={`${title} · ${active.label}`}
           action={setAsBackdrop}
@@ -1136,6 +1157,9 @@ function PhotoCard({
     >
       <PosterImage
         src={img.previewUrl}
+        // 横卡 263×148 / 竖卡 99×148（手机更小），悬停放大 1.05
+        width={landscape ? 264 : 99}
+        zoom={1.05}
         alt={`${title} ${label}`}
         className="size-full object-cover transition-transform duration-500 ease-out hover:scale-[1.05]"
       />

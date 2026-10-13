@@ -218,6 +218,7 @@ extension TaskCenter {
         "library.chapter_images": "生成章节",
         "library.skip_segments": "识别片头片尾",
         "media.skip_segments": "识别片头片尾",
+        "reels.clips": "预切片段",
         "library.organize": "整理媒体库文件",
         "library.transfer": "转移媒体库条目",
         "library.ingest": "自动整理入库",
@@ -246,6 +247,7 @@ extension TaskCenter {
         "subtitle.generate": "正在生成字幕", "library.scan": "正在扫描", "library.metadata.refresh": "正在刷新媒体库元数据",
         "media.metadata.refresh": "正在刷新元数据", "library.chapter_images": "正在生成章节", "library.organize": "正在整理文件",
         "library.skip_segments": "正在识别片头片尾", "media.skip_segments": "正在识别片头片尾",
+        "reels.clips": "正在预切片段",
         "library.transfer": "正在转移文件", "library.ingest": "正在入库",
     ]
 
@@ -253,6 +255,7 @@ extension TaskCenter {
         "subtitle.generate": "字幕生成", "library.scan": "扫描", "library.metadata.refresh": "元数据刷新",
         "media.metadata.refresh": "元数据刷新", "library.chapter_images": "章节生成", "library.organize": "文件整理",
         "library.skip_segments": "片头片尾识别", "media.skip_segments": "片头片尾识别",
+        "reels.clips": "片段预切",
         "library.transfer": "文件转移", "library.ingest": "入库",
     ]
 
@@ -321,7 +324,11 @@ extension TaskCenter {
         string(job.progress.details, key) ?? string(job.inputData, key)
     }
 
-    static func jobTypeLabel(_ job: API.JobView) -> String { jobTypeLabels[job.jobType] ?? job.jobType }
+    /// 任务类型的显示名：内置类型用本地文案，插件任务用服务端给的名字（`job_type_label`），都没有显示原始类型。
+    /// 与 Web `jobTypeLabel`（components/job-center.tsx）同一顺序
+    static func jobTypeLabel(_ job: API.JobView) -> String {
+        jobTypeLabels[job.jobType] ?? nonEmpty(job.jobTypeLabel) ?? job.jobType
+    }
 
     /// Job 的错误信息（error.message）
     static func errorMessage(_ job: API.JobView) -> String? { string(job.error, "message") }
@@ -363,7 +370,8 @@ extension TaskCenter {
         }
         let unit = job.jobType == "subtitle.generate" ? "个分块"
             : job.jobType == "library.scan" ? "个文件"
-            : job.jobType.contains("metadata.refresh") ? "个条目" : "项"
+            : job.jobType == "media.metadata.refresh" ? "张图片"
+            : job.jobType == "library.metadata.refresh" ? "个条目" : "项"
         return "已处理 \(current) / \(total) \(unit)"
     }
 
@@ -377,7 +385,9 @@ extension TaskCenter {
         case "subtitle.generate": "个分块"
         case "library.scan", "library.organize": "个文件"
         case "library.transfer": "个路径"
-        default: job.jobType.contains("metadata.refresh") ? "个条目" : "项"
+        case "media.metadata.refresh": "张图片"
+        case "library.metadata.refresh": "个条目"
+        default: "项"
         }
         return "\(current) / \(total) \(unit)"
     }
@@ -444,6 +454,11 @@ extension TaskCenter {
         var alert = false
     }
 
+    /// 成功但有没办成的部分（刷新时几张图没下到）：时间线上画黄勾而不是绿勾，同 Web
+    static func succeededWithProblems(_ job: API.JobView) -> Bool {
+        job.status == "succeeded" && jobDetailItems(job).contains(where: \.alert)
+    }
+
     static func jobDetailItems(_ job: API.JobView) -> [DetailItem] {
         let details = job.progress.details
         var items: [DetailItem] = []
@@ -476,10 +491,24 @@ extension TaskCenter {
             if details["cross_device"]?.boolValue == true { items.append(DetailItem(label: "跨盘复制")) }
         case "library.ingest":
             if let name = string(details, "file_name") { items.append(DetailItem(label: name)) }
-        default:
-            if job.jobType.contains("metadata.refresh"), let failed = int("failed"), failed != 0 {
-                items.append(DetailItem(label: "\(failed) 个未完成", alert: true))
+        case "library.metadata.refresh", "media.metadata.refresh":
+            // 同 Web：正在刷新哪部、到哪一步已写在摘要文案里，这里只补失败（琥珀色）与图片记账
+            if let failed = int("failed"), failed != 0 {
+                items.append(DetailItem(label: "\(failed) 个条目未完成", alert: true))
             }
+            let images: [String: API.JSONValue]? = if case let .object(value)? = details["images"] { value } else { nil }
+            func image(_ key: String) -> Int { number(images, key).map { Int($0) } ?? 0 }
+            if image("failed") != 0 { items.append(DetailItem(label: "\(image("failed")) 张图片未下载", alert: true)) }
+            if image("downloaded") != 0 {
+                let size = ActivityFormat.bytes(number(images, "bytes") ?? 0)
+                items.append(DetailItem(label: "新下载 \(image("downloaded")) 张 · \(size)"))
+            }
+            if image("reused") != 0 { items.append(DetailItem(label: "沿用 \(image("reused")) 张")) }
+            if image("adopted") != 0 { items.append(DetailItem(label: "从媒体目录收编 \(image("adopted")) 张")) }
+            if image("derived") != 0 { items.append(DetailItem(label: "本地缩图 \(image("derived")) 张")) }
+            if image("grabbed") != 0 { items.append(DetailItem(label: "截取 \(image("grabbed")) 张剧照")) }
+        default:
+            break
         }
         return Array(items.prefix(4))
     }

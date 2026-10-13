@@ -5,14 +5,14 @@ import SwiftUI
 /// 这一页承担两项上架前必须满足的义务：
 /// - **LGPL**：自研播放引擎 AetherEngine（LGPL-3.0 + App Store 例外）与它自带的 FFmpeg（LGPL-2.1）
 ///   以动态框架随包（见 project.yml 的 AetherCore 目标）。许可要求向用户说明组件、附上许可全文、
-///   给出（修改后的）源码地址——全文随包放在 About/Licenses 下，点组件即可阅读；
+///   给出（修改后的）源码地址——全文随包放在 Shared/Resources/Licenses 下，点组件即可阅读；
 /// - **TMDB 使用条款**：使用 TMDB 数据的产品必须注明「使用 TMDB API，但未经 TMDB 认可或认证」。
 ///
 /// 升级 AetherEngine / FFmpegBuild / Nuke 等依赖时，同步核对这里的版本、许可与地址。
 struct AboutView: View {
     var body: some View {
         List {
-            Section {
+            SettingsFormSection {
                 LabeledContent("版本", value: Self.versionText)
                 Link(destination: URL(string: "https://github.com/movieclaw/movieclaw")!) {
                     Label("MovieClaw 原项目主页", systemImage: "chevron.left.forwardslash.chevron.right")
@@ -21,10 +21,10 @@ struct AboutView: View {
                     Label("隐私政策", systemImage: "hand.raised")
                 }
             } footer: {
-                Text("Luca Cinema 基于 MovieClaw v0.30.0 修改，用于个人非商业测试。本版修改了客户端名称、图标与应用签名标识，服务器协议与播放引擎保持原实现。你的媒体、账号与观看记录都在你自己部署的服务器上。原作者版权及许可证继续保留。App 不向开发者或任何第三方上传数据。")
+                Text("Luca Cinema 基于 MovieClaw v0.37.0 修改，仅供个人非商业测试。修改了客户端名称、图标与签名标识，保留原作者版权及完整许可证。媒体、账号与观看记录保存在你自己部署的服务器上。")
             }
 
-            Section {
+            SettingsFormSection {
                 ForEach(OpenSourceComponent.all) { component in
                     NavigationLink {
                         LicenseTextView(component: component)
@@ -40,10 +40,10 @@ struct AboutView: View {
             } header: {
                 Text("开源组件")
             } footer: {
-                Text("播放引擎 AetherEngine 与 FFmpeg 以动态框架随 App 分发，你可以按各自的许可获取源码、修改并替换。本 App 使用的 AetherEngine 修改版源码见项目仓库 apps/apple/Vendor/AetherEngine。")
+                Text("播放引擎 AetherEngine 与 FFmpeg 以动态框架随 App 分发，你可以按各自的许可获取源码、修改并替换。本 App 使用的 AetherEngine 修改版源码可通过下方组件链接获取，链接对应本次构建使用的提交。")
             }
 
-            Section {
+            SettingsFormSection {
                 Link(destination: URL(string: "https://www.themoviedb.org")!) {
                     Label("The Movie Database (TMDB)", systemImage: "film.stack")
                 }
@@ -65,47 +65,6 @@ struct AboutView: View {
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "\(version)（\(build)）"
     }
-}
-
-/// 随包分发的一个开源组件：名称、许可、源码地址、随包许可全文的资源名（About/Licenses/<licenseFile>.txt）。
-struct OpenSourceComponent: Identifiable {
-    let name: String
-    let license: String
-    let source: String
-    /// 可能有多份：LGPL-3.0 以 GPL-3.0 为基础，两份全文都要附上
-    let licenseFiles: [String]
-
-    var id: String { name }
-
-    static let all: [OpenSourceComponent] = [
-        .init(name: "MovieClaw（Luca Cinema 基于此项目修改）", license: "修改版 Apache-2.0，附非商业限制",
-              source: "https://github.com/movieclaw/MovieClaw/tree/v0.30.0",
-              licenseFiles: ["License-MovieClaw"]),
-        .init(name: "AetherEngine（MovieClaw 修改版）", license: "LGPL-3.0，附 App Store 例外",
-              source: "https://github.com/movieclaw/MovieClaw/tree/v0.30.0/apps/apple/Vendor/AetherEngine",
-              licenseFiles: ["License-AetherEngine", "License-GPL-3.0"]),
-        .init(name: "FFmpeg", license: "LGPL-2.1 或更新版本",
-              source: "https://github.com/superuser404notfound/FFmpegBuild",
-              licenseFiles: ["License-LGPL-2.1"]),
-        .init(name: "libzvbi", license: "LGPL-2.1（ure.c 为 MIT）",
-              source: "https://github.com/superuser404notfound/FFmpegBuild",
-              licenseFiles: ["License-LGPL-2.1", "License-libzvbi-ure"]),
-        .init(name: "dav1d", license: "BSD-2-Clause",
-              source: "https://code.videolan.org/videolan/dav1d",
-              licenseFiles: ["License-dav1d"]),
-        .init(name: "zimg", license: "WTFPL",
-              source: "https://github.com/sekrit-twc/zimg",
-              licenseFiles: ["License-zimg"]),
-        .init(name: "LibDovi / libdovi", license: "MIT",
-              source: "https://github.com/superuser404notfound/LibDovi",
-              licenseFiles: ["License-LibDovi"]),
-        .init(name: "Nuke", license: "MIT",
-              source: "https://github.com/kean/Nuke",
-              licenseFiles: ["License-Nuke"]),
-        .init(name: "思源宋体（Noto Serif SC，欢迎页子集）", license: "SIL Open Font License 1.1",
-              source: "https://github.com/notofonts/noto-cjk",
-              licenseFiles: ["OFL"]),
-    ]
 }
 
 /// 一个组件的源码地址与许可全文

@@ -36,7 +36,7 @@
 | 字段 | 说明 |
 |---|---|
 | `member_id` | 主人：成员 id，0 = 超管（成员级表的哨兵约定；删除成员时统一清理） |
-| `kind` | 客户端类型：`web` / `ios` / `tvos` / `android` / `cli` / `worker` / `manual` |
+| `kind` | 客户端类型：`web` / `ios` / `tvos` / `macos` / `android` / `cli` / `worker` / `manual` |
 | `name` | 给人看的设备名，可改名 |
 | `token_hash` | 令牌明文（`mclaw_` 前缀）的 sha256，唯一索引；明文只在签发时交付一次 |
 | `scope` | `full` = 等同本人；`transcode` = 只能转码（转码器凭证的形态上限） |
@@ -50,8 +50,8 @@
 | 签发方式 | 客户端 | 入口 |
 |---|---|---|
 | 账号密码 | 网页 | `POST /auth/login`（令牌进 HttpOnly Cookie） |
-| 账号密码 | iOS / Apple TV / Android App | `POST /auth/device/login`（令牌进系统钥匙串） |
-| 配对码批准 | 命令行、转码器 | `POST /auth/device/authorize` → 人批准 → `POST /auth/device/token` |
+| 账号密码 | iOS / Apple TV / Mac / Android App | `POST /auth/device/login`（令牌进系统钥匙串） |
+| 配对码批准 | 命令行、转码器、Apple TV、Mac App | `POST /auth/device/authorize` → 人批准 → `POST /auth/device/token` |
 | 手工创建 | 无人值守的脚本、命令行模式的转码器 | `POST /auth/tokens`（超管） |
 
 Jellyfin 播放器的凭证受协议约束多（令牌格式、同设备覆盖语义），暂时仍在
@@ -94,10 +94,11 @@ Jellyfin 播放器的凭证受协议约束多（令牌格式、同设备覆盖�
 1. **成员也能批准自己的命令行**，令牌的身份与权限就是这个成员；
    **转码器只能由超管批准**（转码是整台服务器的资源）。
 2. **按配对码批准，不再列出全部待批准请求**。`authorize` 响应多了
-   `verification_uri_complete`（`/settings/devices?code=MCLW-XXXX`），设备应
+   `verification_uri_complete`（`/activate?code=MCLW-XXXX`，独立的批准页；旧地址 `/settings/devices?code=` 会跳过去），设备应
    优先打开它；批准页只显示这一条（`GET /auth/devices/requests/{code}`）。成员
    之间看不到彼此的请求，管理员也不会误批一个成员的命令行、让它拿到超管权限。
-   打不开链接的无头机器，人在网页 / App 的「设备」页手动输入配对码。
+   打不开链接的无头机器，人在网页的批准页（`/activate`）或 App 的批准页手动输入配对码；
+   iPhone App 在「我的」页右上角（搜索左边）有扫码钮，扫设备上的二维码直达批准页。
 3. `authorize` 可选上报 `installation_id` / `platform` / `client_version`：同一台
    机器重新配对时替换旧令牌，批准页与设备列表也能写清楚是哪台机器。
 4. 兑换响应的 `granted_by` 是批准者的用户名（「你现在是谁」）。
@@ -112,7 +113,7 @@ Jellyfin 播放器的凭证受协议约束多（令牌格式、同设备覆盖�
 | 成员被停用 / 删除 | 全部下线（行删除，重新启用不复活） | 全部下线 |
 | 成员管理页「全部下线」 | 全部下线 | 全部下线 |
 | 注销某台设备 | 立即失效，并停掉它在播的流与转码会话、断开转码器连接 | 同左 |
-| 长期不用 | 不自动失效（界面可提示） | 同左 |
+| 长期不用 | 不自动失效（界面可提示）；设备页「清理…」可一次注销 N 天没用过的 | 同左（连着的转码器不清） |
 
 - 配对的默认保留：转码器常年无人值守，改个密码就停转码很难排查；怀疑密码泄露时
   应勾选一并注销。
@@ -131,6 +132,7 @@ Jellyfin 播放器的凭证受协议约束多（令牌格式、同设备覆盖�
 | `DELETE /auth/devices/current` | 任何设备凭证 | 注销自己（`mclaw logout`、App 退出、转码器断开配对） |
 | `PATCH /auth/devices/{id}` | 人在操作 | 改名（Jellyfin 播放器不可改名） |
 | `DELETE /auth/devices/{id}` | 人在操作 | 注销（自己的；超管可注销任何人的） |
+| `POST /auth/devices/cleanup` | 人在操作（`all` 仅超管） | 清理：`{inactive_days, all?, dry_run?}`，注销最近活跃（没有就按签发时间）早于 N 天的设备与 Jellyfin 播放器；本机、此刻连着的转码器不清。`dry_run` 只列名单给确认框用 |
 | `GET /auth/devices/requests/{code}` | 人在操作 | 按配对码查看一条待批准请求（含 `requires_admin`） |
 | `POST /auth/devices/requests/{code}/approve\|deny` | 人在操作（转码器需超管） | 批准 / 拒绝 |
 | `POST /auth/tokens` | 超管 + 人在操作 | 手工令牌：`{name, scope: full\|transcode}` |
@@ -152,6 +154,14 @@ Jellyfin 播放器的凭证受协议约束多（令牌格式、同设备覆盖�
 
 ## 8. 客户端
 
+- **设备页浏览方式（网页与 iPhone 一致）**：保留浏览器、App、命令行与转码器、播放器
+  四类摘要，按服务端顺序展示每类当前在线的前 5 台。本机恒在线，转码器看 `connected`，
+  其余沿用最近 5 分钟活动的口径。有记录但全离线显示「暂无在线设备」并保留「查看全部」；
+  零记录显示「暂无设备记录」，不显示无效的查看入口。
+  「查看全部」进入该类全部记录的抽屉，在线优先、离线按最近使用排列；四类可在抽屉内直接
+  切换。PC 为右侧抽屉，移动网页与 iPhone 为底部抽屉，没有搜索与页码。每批显示 20 条，
+  滚到末尾自动追加，下拉重新请求列表；分类与浏览位置在关闭后保留。继续沿用每 15 秒
+  刷新的完整设备接口，分批显示在客户端进行，不更改改名、注销与权限边界。
 - **网页**：「设置 → 设备」对所有人开放——按配对码批准（链接带 `?code=` 时预填）、
   我的设备列表（当前设备、改名、注销）；超管另有「全部成员」视图与手工令牌。
   改密卡片多一个「同时注销命令行和转码器（N 台）」。成员管理页显示设备数、可「全部下线」。

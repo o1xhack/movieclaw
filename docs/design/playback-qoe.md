@@ -188,6 +188,24 @@
 | 本地队列与异常退出 | localStorage：发不出去的记录排队、下次打开播放器补发；「正在播放」标记每 10 秒刷新，30 秒没刷新（多开标签页时别的页还在刷）才按异常退出补报 |
 | 实验室标签 | localStorage 的 `movieclaw.player.lab`（实验台在页面加载前写入） |
 
+### 3.8 Android TV（2026-10-08 接入）
+
+Android TV（`apps/android-tv`，Media3 ExoPlayer）报同一份记录，`client=androidtv`，服务端零改动。实现在
+`core/playback/PlaybackRecord.kt`（口径与单测对照 Apple 的 `PlaybackRecordTests.swift`）、`PlaybackDiagnostics.kt`、
+`PlaybackReportStore.kt`。与 App 的差异：
+
+| 项 | Android TV 的做法 |
+|---|---|
+| 首帧 / 跳转落地 | `onRenderedFirstFrame`；原地跳转、原地换轨在 `STATE_READY` 落地，换会话式的在新流首帧落地；跳转来源 `dpad`（±10）/ `scrub` / `skip` / `media_key` / `lab` |
+| 卡顿 | 与 App 同：250 毫秒采播放头，0.5 秒不走算一次，首帧、落地、换轨出画后 1.5 秒宽限；换会话、重连期间画面停着也算（原因 `session_restart`） |
+| 冻帧 | 不报（Exo 的画面与时钟一体，掉帧走 `dropped_frames`） |
+| 规格快照 `delivery` | 另带 Exo 实际选的解码器名与是否硬解、解出来的格式（含 color transfer）、音频输出编码（PCM = 本机解码，AC3 / E-AC-3 / TrueHD = 透传）与通道、tunneling、当前显示模式；`output.audio_route` 的 eARC 记 `hdmi`（能传无损），ARC 记 `hdmi_arc` |
+| 设备快照 `device`（Android 多出的一块） | 厂商 / 机型 / 芯片 / 系统、显示器支持的模式与 HDR 类型、各音频输出设备与 HDMI 能透传的编码、各编码的解码器清单（硬 / 软、最大高度）、内存。种子用户真机排查主要靠它 |
+| 日志尾巴 | 引擎事件环形缓冲（300 行）：解码器初始化、格式变化、音频输出配置、欠载、掉帧、解码 / 输出错误与异常链、失败处置。**失败、异常退出之外，卡过、引擎失败被接住、降过级也附上**（种子测试期要看「卡了一下」是哪一环） |
+| 异常退出 | 播放中每 10 秒把记录快照写进单独的小文件（原子替换，不进偏好存储；平时不带日志尾巴，几 KB）；崩溃时未捕获异常处理器同步写崩溃栈 + 日志尾巴；下次打开播放器补报为 `abnormal_exit`。收尾记录先进本机队列，发成功才删 |
+| 资源 | 每 10 秒：进程内存（Java + 原生堆）、发热状态（API 29+）；不报电量 / CPU |
+| 实验室标签 | 调试包启动参数 `--es mc_lab <场景名>`（故障注入实验台自动打 `rig:<场景>`） |
+
 ## 4. 引擎：第一阶段不打补丁
 
 原计划的 P32 ～ P34 核实后都不需要，信号全部来自引擎已公开的接口，只在 App 的包装层（`AetherCore/AetherPlayback.swift`）接出来：
@@ -595,7 +613,7 @@ onAppear 里才接上控制器，控制层、手势层、菜单这时才建）�
 （片库超过 100 MB 的 MP4 约六成，抽样 60 部有 34 部）走的是另一条路，结局相同：解复用器读到 mdat 盒子头就跳去文件尾读 moov，
 读取器把文件头连接挪过去，回到 mdat 开头时同样掉进 4 MB 整块补取。
 
-**改动**（`Vendor/AetherEngine/PATCHES.md` P53～P56，各带开关，对照时关掉）：
+**改动**（[fork 的 PATCHES.md](https://github.com/yipengfei329/AetherEngine/blob/main/PATCHES.md) P53～P56，各带开关，对照时关掉）：
 
 | 补丁 | 做什么 | App 开关（关） |
 |---|---|---|
@@ -657,7 +675,7 @@ P56 是对 P54 的纠偏：《大江大河》MP4（1.3 Mbit/s，moov 3.2 MB，�
 - AVPlayer 能边收边解一个还没写完的分片（分块传输），收到完整的片段（moof + mdat）就能出画，分片内的片段 0.5 秒最好。
   所以切段不动，改成「分片边产出边送」。
 
-**改动**（`Vendor/AetherEngine/PATCHES.md` P57～P59，各带开关）：
+**改动**（[fork 的 PATCHES.md](https://github.com/yipengfei329/AetherEngine/blob/main/PATCHES.md) P57～P59，各带开关）：
 
 | 补丁 | 做什么 | App 开关（关） |
 |---|---|---|

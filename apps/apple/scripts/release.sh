@@ -1,11 +1,15 @@
 #!/bin/zsh
-# 打包 iOS App（Release 归档 → 导出），可选直接上传到 App Store Connect。
+# 打包 iPhone / Apple TV / Mac App（Release 归档 → 导出），可选直接上传到 App Store Connect。
 # 只有一个发行版本：同一个构建既进内部 / 对外 TestFlight，也用于提审。发版流程与上架清单见
 # docs/design/ios-release.md。
+# 三端共用同一条 App Store 记录（同一个 Bundle ID）、各自一条构建序列，按需分别打包上传。
+# Mac 版这里只管 TestFlight / App Store；随 GitHub Release 发的公证 zip 见 package-mac-app.sh。
 #
 # 用法：
-#   scripts/release.sh           只在本机导出 .ipa，不上传（验证签名与打包）
-#   scripts/release.sh --upload  导出并上传到 App Store Connect
+#   scripts/release.sh                只在本机导出 iPhone 版 .ipa，不上传（验证签名与打包）
+#   scripts/release.sh --upload       导出并上传 iPhone 版到 App Store Connect
+#   scripts/release.sh --tv [--upload] 同上，打的是 Apple TV 版
+#   scripts/release.sh --mac [--upload] 同上，打的是 Mac 版（导出为 .pkg）
 #
 # 认证（二选一）：
 #   - App Store Connect API 密钥（推荐，无人值守/CI 都能用；角色须为「管理」，「App 管理」用不了云端发布证书）：
@@ -21,10 +25,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 upload=0
+scheme=MovieClaw platform=iOS
 for arg in "$@"; do
   case $arg in
     --upload) upload=1 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    --tv) scheme=MovieClawTV platform=tvOS ;;
+    --mac) scheme=MovieClawMac platform=macOS ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "未知参数：$arg（用 --help 看用法）" >&2; exit 64 ;;
   esac
 done
@@ -43,10 +50,10 @@ fi
 
 command -v xcodegen >/dev/null || { echo "错误：需要 XcodeGen（brew install xcodegen）" >&2; exit 1; }
 # 每次都按 project.yml 重新生成，保证打包用的工程与仓库里的定义一致
-xcodegen generate >/dev/null
+scripts/prepare-project.py
 
-settings="$(xcodebuild -project MovieClaw.xcodeproj -scheme MovieClaw -configuration Release \
-  -showBuildSettings 2>/dev/null)"
+settings="$(xcodebuild -project MovieClaw.xcodeproj -scheme "$scheme" -configuration Release \
+  -clonedSourcePackagesDirPath "${MC_SPM:-$HOME/workspace/.mc-ios-spm}" -onlyUsePackageVersionsFromResolvedFile -showBuildSettings 2>/dev/null)"
 setting() { awk -v k="$1" '$1 == k && $2 == "=" { $1 = ""; $2 = ""; sub(/^ +/, ""); print; exit }' <<<"$settings"; }
 team="$(setting DEVELOPMENT_TEAM)"
 bundle_id="$(setting PRODUCT_BUNDLE_IDENTIFIER)"
@@ -64,17 +71,17 @@ if [[ -n "$(git status --porcelain -- .)" ]]; then
 fi
 
 out="build-release"
-name="MovieClaw-${version}-${build}"
+name="${scheme}-${version}-${build}"
 archive="$out/$name.xcarchive"
 mkdir -p "$out"
-echo "打包 $bundle_id $version（$build），团队 $team，提交 $commit"
+echo "打包 $platform 版 $bundle_id $version（$build），团队 $team，提交 $commit"
 
 # 归档。-allowProvisioningUpdates 让自动签名按需创建/更新发布证书与描述文件
 echo "归档中（完整日志：$out/$name-archive.log）…"
-if ! xcodebuild -project MovieClaw.xcodeproj -scheme MovieClaw -configuration Release \
-  -destination "generic/platform=iOS" -archivePath "$archive" \
+if ! xcodebuild -project MovieClaw.xcodeproj -scheme "$scheme" -configuration Release \
+  -destination "generic/platform=$platform" -archivePath "$archive" \
   -derivedDataPath "${MC_DERIVED:-$out/DerivedData}" \
-  -clonedSourcePackagesDirPath "${MC_SPM:-$HOME/workspace/.mc-ios-spm}" -packageAuthorizationProvider netrc \
+  -clonedSourcePackagesDirPath "${MC_SPM:-$HOME/workspace/.mc-ios-spm}" -packageAuthorizationProvider netrc -onlyUsePackageVersionsFromResolvedFile \
   -allowProvisioningUpdates "${auth[@]}" \
   CURRENT_PROJECT_VERSION="$build" \
   archive >"$out/$name-archive.log" 2>&1; then
@@ -100,7 +107,7 @@ cat >"$export_options" <<EOF
 </plist>
 EOF
 
-echo "$([[ $upload == 1 ]] && echo "导出并上传到 App Store Connect" || echo "导出 .ipa")中（完整日志：$out/$name-export.log）…"
+echo "$([[ $upload == 1 ]] && echo "导出并上传到 App Store Connect" || echo "导出安装包")中（完整日志：$out/$name-export.log）…"
 if ! xcodebuild -exportArchive -archivePath "$archive" -exportPath "$out/$name" \
   -exportOptionsPlist "$export_options" -allowProvisioningUpdates "${auth[@]}" \
   >"$out/$name-export.log" 2>&1; then
@@ -110,7 +117,7 @@ if ! xcodebuild -exportArchive -archivePath "$archive" -exportPath "$out/$name" 
 fi
 
 if [[ $upload == 1 ]]; then
-  echo "✅ 已上传 $version（$build）。App Store Connect 处理完（通常 5～30 分钟）后会出现在 TestFlight 里。"
+  echo "✅ 已上传 $platform 版 $version（$build）。App Store Connect 处理完（通常 5～30 分钟）后会出现在 TestFlight 里。"
 else
   echo "✅ 已导出：$out/$name/"
 fi

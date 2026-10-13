@@ -14,6 +14,8 @@ from movieclaw_db.models.base import TimestampMixin, utcnow
 from movieclaw_db.models.cache_entry import CacheEntry
 from movieclaw_db.models.channel_account import ChannelAccount, ChannelAccountStatus
 from movieclaw_db.models.collection import Collection, CollectionItem
+from movieclaw_db.models.domain_event import DomainEvent, EventConsumer, EventDeadLetter
+from movieclaw_db.models.download_file_source import DownloadFileSource
 from movieclaw_db.models.download_hint import DownloadHint
 from movieclaw_db.models.download_target_pref import DownloadTargetPref
 from movieclaw_db.models.downloader_client import ClientType, DownloaderClient
@@ -50,6 +52,11 @@ from movieclaw_db.models.person import MediaItemPerson, Person
 from movieclaw_db.models.playback_log import PlaybackLog
 from movieclaw_db.models.playback_metric import PlaybackMetric
 from movieclaw_db.models.playback_state import PlaybackState
+from movieclaw_db.models.plugin_callback import PluginCallback
+from movieclaw_db.models.plugin_data import PluginData
+from movieclaw_db.models.push_download_watch import PushDownloadWatch
+from movieclaw_db.models.push_outbox import PushOutbox
+from movieclaw_db.models.push_preference import PushPreference
 from movieclaw_db.models.ratio_boost_stat import RatioBoostStat
 from movieclaw_db.models.ratio_boost_task import BoostTaskState, RatioBoostTask
 from movieclaw_db.models.ratio_boost_task_sample import RatioBoostTaskSample
@@ -71,6 +78,13 @@ from movieclaw_db.models.site_torrent import (
 )
 from movieclaw_db.models.site_torrent_swarm_sample import SiteTorrentSwarmSample
 from movieclaw_db.models.site_user_profile import SiteUserProfile
+from movieclaw_db.models.smart_subscription import (
+    SmartCandidate,
+    SmartDecisionRecord,
+    SmartProfile,
+    SmartSeason,
+)
+from movieclaw_db.models.strm_probe_state import StrmProbeState
 from movieclaw_db.models.subscription import (
     DownloadAttemptStatus,
     Subscription,
@@ -83,6 +97,7 @@ from movieclaw_db.models.subscription import (
 from movieclaw_db.models.subscription_activity import ActivityType, SubscriptionActivity
 from movieclaw_db.models.subtitle_auto_mute import SubtitleAutoMute
 from movieclaw_db.models.system_notice import NoticeSeverity, NoticeStatus, SystemNotice
+from movieclaw_db.models.tip import TipEvent, TipRecord
 
 __all__ = [
     "TimestampMixin",
@@ -101,9 +116,13 @@ __all__ = [
     "TriggerType",
     "AppSetting",
     "ClientType",
+    "DomainEvent",
+    "DownloadFileSource",
     "DownloadHint",
     "DownloadTargetPref",
     "DownloaderClient",
+    "EventConsumer",
+    "EventDeadLetter",
     "FileSource",
     "FileState",
     "ImportWatch",
@@ -138,8 +157,13 @@ __all__ = [
     "MemberSiteAccess",
     "Person",
     "PlaybackLog",
+    "PushDownloadWatch",
+    "PushOutbox",
+    "PushPreference",
     "PlaybackMetric",
     "PlaybackState",
+    "PluginCallback",
+    "PluginData",
     "MediaSeason",
     "BoostTaskState",
     "Collection",
@@ -151,6 +175,10 @@ __all__ = [
     "ReelEvent",
     "RuleSet",
     "Subscription",
+    "SmartProfile",
+    "SmartCandidate",
+    "SmartDecisionRecord",
+    "SmartSeason",
     "SubscriptionDownloadAttempt",
     "DownloadAttemptStatus",
     "SubscriptionFollower",
@@ -161,12 +189,15 @@ __all__ = [
     "SubscriptionActivity",
     "SubtitleAutoMute",
     "SearchHistory",
+    "StrmProbeState",
     "SiteTorrent",
     "SiteTorrentSwarmSample",
     "SiteSyncCursor",
     "TorrentSource",
     "SiteUserProfile",
     "SystemNotice",
+    "TipEvent",
+    "TipRecord",
     "NoticeSeverity",
     "NoticeStatus",
 ]

@@ -1,36 +1,37 @@
-# MovieClaw（浏览器插件）
+# MovieClaw（浏览器扩展）
 
-配套 MovieClaw 主程序使用的极简 Chrome 插件。核心作用：读取你正在浏览的站点的
+配套 MovieClaw 主程序使用的极简 Chrome 扩展。核心作用：读取你正在浏览的站点的
 Cookie（含 httpOnly 会话 Cookie），用于主程序的站点模拟访问。
 
-> 普通用户无需从源码构建：在 MovieClaw 后台「设置 → 浏览器插件」页可直接下载
-> 插件包（zip），解压后按页面指引加载即可。后台页面会自动检测插件是否已安装
-> （原理：manifest 固定了公钥 `key`，插件 ID 恒定，Web 端探测其标记文件）。
+> 普通用户无需从源码构建：在 MovieClaw 后台「设置 → 资源站点 → 浏览器扩展」页可直接下载
+> 扩展安装包（zip），解压后按页面指引加载即可。后台页面会自动检测扩展是否已安装
+> （原理：manifest 固定了公钥 `key`，扩展 ID 恒定，Web 端探测其标记文件）。
 
 ## 技术选型
 
-- **WXT**：基于 Vite 的现代浏览器插件框架，自动生成 Manifest V3，支持 Chrome / Firefox。
+- **WXT**：基于 Vite 的现代浏览器扩展框架，自动生成 Manifest V3，支持 Chrome / Firefox。
 - **原生 TS + 原生 CSS**：popup 页面很简单，不引入任何 UI 框架，保持轻量。
 
 ## 权限设计（易用性优先）
 
 只申请 `cookies`、`activeTab`、`storage` 三个权限，**不申请任何 host_permissions**，
-因此安装时不会弹出"可读取网站数据"的警告。原理：用户点击插件图标这一动作，浏览器
-会临时授予当前标签页的读取权限，插件即可读取该站点 Cookie。
+因此安装时不会弹出"可读取网站数据"的警告。原理：用户点击扩展图标这一动作，浏览器
+会临时授予当前标签页的读取权限，扩展即可读取该站点 Cookie。
 
-> 使用约束：需先停留在目标站点的网页上，再点击插件图标。
+> 使用约束：需先停留在目标站点的网页上，再点击扩展图标。
 
 ## 开发调试
 
 ```bash
 # 在仓库根目录
-pnpm ext:dev      # 启动开发模式，自动打开带插件的 Chrome
+pnpm ext:dev      # 启动开发模式，自动打开带扩展的 Chrome
 pnpm ext:build    # 生产构建，产物在 apps/extension/.output/chrome-mv3
 pnpm ext:zip      # 打包成可上传应用商店的 zip
-pnpm ext:publish  # 打 zip 并发布到 apps/web/public/extension/（Web 后台的下载按钮指向这里）
+pnpm ext:zip:firefox  # Firefox 专用包（MV3 + gecko.id + background.scripts）
+pnpm ext:publish  # Chrome / Firefox 两份 zip 都发布到 apps/web/public/extension/（Web 后台的下载按钮指向这里）
 ```
 
-改动插件代码后记得跑 `pnpm ext:publish` 并提交生成的 zip——它随前端一起构建 /
+改动扩展代码后记得跑 `pnpm ext:publish` 并提交生成的 zip——它随前端一起构建 /
 打进 Docker 镜像，用户从后台下载的就是这份产物。
 
 ## 手动加载（无需命令行）
@@ -39,9 +40,21 @@ pnpm ext:publish  # 打 zip 并发布到 apps/web/public/extension/（Web 后台
 2. Chrome 打开 `chrome://extensions`，右上角开启「开发者模式」。
 3. 点「加载已解压的扩展程序」，选择上述 `chrome-mv3` 目录。
 
+## Firefox
+
+Chrome 包不能装进 Firefox（会提示「附加组件已损坏」）：它没有 Firefox MV3 必需的
+`browser_specific_settings.gecko.id`，后台也是 Firefox 不支持的 `service_worker`。
+请使用 `pnpm ext:zip:firefox` 产出的 `*-firefox.zip`（后台下载名 `movieclaw-extension-firefox.zip`）：
+
+- 正式版 Firefox：`about:debugging` →「此 Firefox」→「临时载入附加组件」选择该 zip；重启后失效。
+- 开发者版 / Nightly / ESR：`about:config` 设 `xpinstall.signatures.required=false`，
+  再在附加组件管理器「从文件安装附加组件」，可长期使用。
+- 正式版长期安装需要 Mozilla 签名（AMO 自分发 / unlisted 签名，如 `web-ext sign --channel=unlisted`），
+  未签名包会提示「无法验证」。
+
 ## 交互设计（单弹窗，两视图）
 
-插件只有一个弹窗，内含两个视图，通过顶栏齿轮 / 返回箭头切换：
+扩展只有一个弹窗，内含两个视图，通过顶栏齿轮 / 返回箭头切换：
 
 - **主视图**：顶栏常驻「已连接 / 未配置 / 后端未连接」状态徽标；对当前站点只做两件事——
   **授权本站** →**立即同步**（同步过则显示「重新同步」与「上次同步于何时」）。不支持的站点会明确提示。
@@ -50,9 +63,9 @@ pnpm ext:publish  # 打 zip 并发布到 apps/web/public/extension/（Web 后台
 
 ## 后端同步
 
-1. 在 MovieClaw 后台「设置 → 浏览器插件」生成同步令牌（或 `POST /api/v1/extension/token`）。
+1. 在 MovieClaw 后台「设置 → 资源站点 → 浏览器扩展」生成同步令牌（或 `POST /api/v1/extension/token`）。
 2. 弹窗顶栏齿轮 → 设置视图，填入后端地址与令牌，「测试连接」→「保存」（保存时一次性申请后端地址访问权限）。
-3. 在受支持且已登录的站点页面点插件图标 →（首次）授权本站 →「立即同步」。
+3. 在受支持且已登录的站点页面点扩展图标 →（首次）授权本站 →「立即同步」。
 
 后端接口一览（详见 `src/movieclaw_api/api/routes/extension.py`）：
 
@@ -63,7 +76,7 @@ pnpm ext:publish  # 打 zip 并发布到 apps/web/public/extension/（Web 后台
 
 ## 自动同步（全局开关，后台执行）
 
-设置里开启全局「自动同步」后，凡是**同步过一次的站点**都会被纳入管理，插件后台
+设置里开启全局「自动同步」后，凡是**同步过一次的站点**都会被纳入管理，扩展后台
 （[background.ts](entrypoints/background.ts)）随即：
 
 - **实时**：监听 `chrome.cookies.onChanged`，被管理站点的 Cookie 一变就【防抖 2 秒】后推送最新值；
@@ -71,7 +84,21 @@ pnpm ext:publish  # 打 zip 并发布到 apps/web/public/extension/（Web 后台
 - **定时兜底**：`alarms` 每 30 分钟全量推一次，防止漏掉的事件累积成陈旧。
 
 后台读取 Cookie 依赖站点 host 权限、推送依赖后端源 host 权限，二者都在授权/保存配置时已获得。
-同步结果记入本地，弹窗会显示「上次同步：x 分钟前」。出错时插件图标上会出现红色角标。
+同步结果记入本地，弹窗会显示上次成功同步的时间，失败时显示具体原因；出错时扩展图标上会出现红色角标。
+
+### 授权后的首次同步（Firefox 弹窗会被权限提示关掉）
+
+Firefox 里点「允许读取本站 Cookie」弹出权限提示时弹窗会被关闭，授权之后的代码不会执行。因此：
+
+- 弹窗在展示授权按钮时就把「授权意图」（站点、页面 URL、容器 `cookieStoreId`）写入 storage；
+- 后台监听 `permissions.onAdded`，读到意图就替弹窗完成首次同步，结果用图标角标提示（绿色 ✓ / 红色 !）；
+- 弹窗重开时，若该站点已授权但本扩展从未推送成功过，会自动补同步一次；
+- 按钮只有在本扩展真的推送成功过之后才显示「重新同步」，与后端是否已有站点记录无关。
+
+Firefox 容器标签页（Multi-Account Containers）的 Cookie 在独立 cookie store 里：弹窗按当前标签页的
+`cookieStoreId` 读取，并记入被管理站点，后台自动同步沿用同一个 store。
+
+决策逻辑在 `lib/sync-logic.ts`，测试：`pnpm --filter extension test`（Node ≥ 22.18）。
 
 ## 路线图
 

@@ -289,6 +289,10 @@ def test_judging_reported_tracks_adds_no_queries(client, tmp_path):
     不因带不带轨、报的是不是默认轨而变。"""
     from sqlalchemy import event
 
+    from movieclaw_api.services.library.search_index import close_search_index
+
+    # 只统计播放心跳；名称索引的独立后台读写不能混进这三次请求的 SQL 条数。
+    client.portal.call(close_search_index)
     _, item_id = seed(client, tmp_path)
     client.portal.call(  # type: ignore[attr-defined]
         partial(_set_tracks, item_id, audio_streams=_EN_ZH_AUDIO,
@@ -470,6 +474,28 @@ def test_session_replays_finished_unit_from_zero(client, tmp_path):
 
     data = start_session(client, item_id)
     assert data["start_ms"] == 0
+    assert data["watch"]["played"] is True
+
+
+def test_rewatching_finished_unit_resumes_where_the_rewatch_stopped(client, tmp_path):
+    """看完后重看到一半就强退（只发过心跳、没发停止），再点开要接着这次重看的位置。
+
+    已看标记保留（不因重看被悄悄改成未看），但续播点不能因为「已看」被丢掉。
+    """
+    _, item_id = seed(client, tmp_path)
+    report(client, item_id, event="start")
+    report(client, item_id, event="stop", position_ms=570_000)  # 95% → 已看
+
+    data = start_session(client, item_id)
+    assert data["start_ms"] == 0  # 重看从头开始
+    report(client, item_id, event="start")
+    report(client, item_id, event="progress", position_ms=240_000)  # 40%，随后强退
+
+    state = resume(client, item_id)
+    assert state["played"] is True
+    assert state["position_ms"] == 240_000
+    data = start_session(client, item_id)
+    assert data["start_ms"] == 240_000
     assert data["watch"]["played"] is True
 
 

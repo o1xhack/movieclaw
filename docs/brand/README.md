@@ -27,10 +27,17 @@
 | `app-icon-dark.svg` / `app-icon-light.svg` | App 图标（400×400，深色为默认，字形外框约占 64%） |
 | `favicon.svg` | 网页标签页图标（字形放大到约占 70%，16px 下也认得出） |
 | `masters/mark-1024.png` | 标志母版（透明底，字形占 91%） |
+| `masters/mark-ui-1024.png` | 细笔画标志母版（笔画占字形 11.5%）：网页侧栏等界面小尺寸用 |
 | `masters/app-icon-1024.png` | App 图标母版（纯黑底、不透明） |
 | `masters/favicon-1024.png` | 标签页图标母版 |
+| `transcoder/` | macOS 转码器专用三角循环标志：应用图标 SVG / 1024 PNG、透明标志 SVG / PNG、菜单栏单色 SVG |
+
+转码器于 2026-10-06 锁定三角循环版，保持主品牌的极光配色，以回转箭头区分主程序。
+应用图标从锁定的 PNG 母版生成，保留色光、光晕和投影；菜单栏使用独立的 18pt 细线模板。
 
 组合规范：标志高 H，字标大写字母高 0.6H，间距 0.3H，四周安全区 0.25H。
+
+**小尺寸换细笔画**：标志在 32px 以下（网页侧栏、菜单栏）改用细笔画版；标准版的粗笔画在小尺寸下会比旁边的文字、图标重一档、显大一号。
 
 ## 各端在哪里、怎么更新
 
@@ -38,7 +45,10 @@
 |---|---|---|
 | 网页 | `apps/web/public/brand/`、`apps/web/app/favicon.ico`、`apps/web/public/favicon.svg`、`apple-touch-icon.png`、`icons/`、`splash/` | `.venv/bin/python scripts/brand/generate_web_assets.py`（启动图的设备清单读 `apps/web/lib/apple-splash.ts`） |
 | iOS | `apps/apple/MovieClaw/Assets.xcassets/AppIcon.appiconset/`：默认（不透明）、深色（透明底）、着色（灰阶）三种外观 | 直接替换三张 1024 PNG |
-| macOS 转码器 | `macos/MovieClawTranscoder/Sources/MovieClawTranscoder/BrandMark.swift`（矢量轮廓）→ `Resources/AppIcon.icns` | 改 `BrandMark.swift` 后跑 `scripts/render-app-icon.sh` |
+| Apple TV | `apps/apple/MovieClawTV/Assets.xcassets/App Icon & Top Shelf Image.brandassets/`：分层图标（背景 + 标志两层，焦点视差）与 Top Shelf 横幅 | `.venv/bin/python scripts/brand/generate_tvos_assets.py`（macOS，字标经 Quick Look 从横版组合 SVG 取出） |
+| Android 手机 | `apps/android/app/src/main/res/`：API 26+ 自适应图标——`drawable-*/ic_launcher_foreground.png`（极光标志，外框占可见区 64%，位置对齐 iOS）、`ic_launcher_monochrome.png`（主题图标单色层）、`drawable/ic_launcher_background.xml`（与 iOS 一致的深色渐变底） | `.venv/bin/python scripts/brand/generate_android_assets.py` |
+| Android TV | `apps/android-tv/app/src/main/res/`：不透明 PNG 横幅（16:9，xhdpi 320×180）、方形 PNG 图标（xhdpi 160×160），mdpi 至 xxxhdpi 五档；API 26+ 为 108dp 自适应前景 + 纯黑背景 | `.venv/bin/python scripts/brand/generate_android_tv_assets.py`（macOS / Pillow，复用 tvOS 字标提取方法） |
+| macOS 转码器 | `docs/brand/transcoder/`：已锁定的三角循环母版；`BrandMark.swift`：运行时矢量徽标与菜单栏模板；`Resources/AppIcon.icns`：应用图标 | 更新专用母版和运行时轮廓后，在转码器目录运行 `scripts/render-app-icon.sh` |
 | 浏览器扩展 | `apps/extension/public/icon/{16,32,48,128}.png`（WXT 自动写进 manifest） | 从 `masters/favicon-1024.png` 缩放 |
 | README | 顶部横幅 `docs/images/banner.{zh,en}.jpg`（和官网分享卡片同一版式，2400×1260，自带深色底，GitHub 明暗主题都能用）；`docs/images/logo-dark.png` / `logo-light.png` 是横版组合（宽 720），README 已不再引用 | 换标志后照官网分享卡片的版式重出横幅 |
 

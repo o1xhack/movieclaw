@@ -13,13 +13,14 @@ import contextlib
 import logging
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, func, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -34,6 +35,20 @@ from movieclaw_db.models import (
     JobStatus,
     utcnow,
 )
+from movieclaw_sdk.jobs import (
+    JOB_HANDLERS,
+    JobBlocked,
+    JobCancelled,
+    JobControlError,
+    JobFailed,
+    JobHandler,
+    JobRetry,
+    RegisteredJobHandler,
+    ResourceRef,
+)
+
+if TYPE_CHECKING:
+    from movieclaw_kernel import Context, Registry
 
 logger = logging.getLogger("movieclaw_api.jobs")
 
@@ -64,97 +79,99 @@ _SECRET_INPUT_KEYS = {
 
 
 @dataclass(frozen=True)
-class ResourceRef:
-    """领域资源中性引用；前端可据此把任务聚合到库、条目或文件。"""
-
-    resource_type: str
-    resource_id: str | int
-    relation: str = "target"
-
-
-@dataclass(frozen=True)
 class CreateJobResult:
     job: Job
     created: bool
 
 
-class JobControlError(Exception):
-    """处理器主动给执行器的结构化结论，绝不把内部异常文本直接暴露。"""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str,
-        actions: list[dict[str, Any]] | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.code = code
-        self.actions = actions or []
-        self.details = details or {}
-
-    def as_error(self) -> dict[str, Any]:
-        return {
-            "code": self.code,
-            "message": self.message,
-            "details": self.details,
-            "actions": self.actions,
-        }
-
-
-class JobFailed(JobControlError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "JOB_FAILED",
-        actions: list[dict[str, Any]] | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message, code=code, actions=actions, details=details)
-
-
-class JobBlocked(JobControlError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "JOB_BLOCKED",
-        actions: list[dict[str, Any]] | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__(message, code=code, actions=actions, details=details)
-
-
-class JobRetry(JobControlError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        delay_seconds: int = 15,
-        code: str = "JOB_RETRY",
-        actions: list[dict[str, Any]] | None = None,
-    ) -> None:
-        super().__init__(message, code=code, actions=actions)
-        self.delay_seconds = max(1, delay_seconds)
-
-
-class JobCancelled(Exception):
-    """处理器已在安全边界响应取消。"""
-
-
-JobHandler = Callable[["JobContext", dict[str, Any]], Awaitable[dict[str, Any] | None]]
-
-
-@dataclass(frozen=True)
-class RegisteredJobHandler:
-    handler: JobHandler
-    definition_versions: frozenset[int]
-
-
+# 声明目录：job_type -> 处理器。模块导入时由 @register_job_handler 填充。
+#
+# 两种模式（docs/design/plugin-kernel.md §6）：应用运行时由插件内核接管，领域插件把自己模块里
+# 声明的处理器贡献进 ``JOB_HANDLERS``，执行器只领取「当前有处理器」的任务类型——所属插件没
+# 启用时任务留在队列里等，而不是被领走后报「请更新版本」；没有内核时（单独驱动执行器的测试、
+# 命令行工具）回落到这份声明目录，行为与以前一致。
 _handlers: dict[str, RegisteredJobHandler] = {}
+
+_bound_handlers: Registry[RegisteredJobHandler] | None = None
+
+
+def bind_handler_registry(registry: Registry[RegisteredJobHandler]) -> Callable[[], None]:
+    """把内核注册表绑定为当前生效的处理器表；返回解绑函数。"""
+    global _bound_handlers
+    _bound_handlers = registry
+
+    def unbind() -> None:
+        global _bound_handlers
+        if _bound_handlers is registry:
+            _bound_handlers = None
+
+    return unbind
+
+
+def resolve_job_handler(job_type: str) -> RegisteredJobHandler | None:
+    if _bound_handlers is not None:
+        return _bound_handlers.get(job_type)
+    return _handlers.get(job_type)
+
+
+#: 本进程里声明过或被贡献过的任务类型。用来区分「所属插件没启用」（留在队列里等）
+#: 和「没有任何代码认识」（照旧领取、以「当前版本无法执行」阻塞，提示用户检查更新）。
+_known_types: set[str] = set()
+
+
+#: 任务类型 → 任务中心显示的名字（处理器贡献时登记；插件停用后仍记得，已取消的任务照样有名字）
+_type_titles: dict[str, str] = {}
+
+
+def note_job_type(job_type: str, *, title: str | None = None) -> None:
+    _known_types.add(job_type)
+    if title:
+        _type_titles[job_type] = title
+
+
+def job_type_label(job_type: str) -> str | None:
+    """任务类型在任务中心显示的名字；处理器没给名字的为 ``None``（显示端各自兜底）。"""
+    registration = resolve_job_handler(job_type) or _handlers.get(job_type)
+    title = getattr(registration, "title", None)
+    return title or _type_titles.get(job_type)
+
+
+def claimable_job_types() -> list[str] | None:
+    """内核接管时：当前有处理器、可以领取的任务类型；没有内核时返回 ``None``（不过滤）。"""
+    if _bound_handlers is not None:
+        return [job_type for job_type, _ in _bound_handlers.items()]
+    return None
+
+
+def _waiting_job_types() -> list[str]:
+    """认识、但当前没有处理器的类型：所属插件没启用，领取时跳过。"""
+    active = set(claimable_job_types() or ())
+    return sorted((_known_types | set(_handlers)) - active)
+
+
+def declared_job_handlers(module: ModuleType) -> list[tuple[str, RegisteredJobHandler]]:
+    """模块里用 ``@register_job_handler`` 声明的处理器（只算本模块定义的函数）。"""
+    found: list[tuple[str, RegisteredJobHandler]] = []
+    for value in vars(module).values():
+        job_types = getattr(value, "__job_types__", ())
+        if not job_types or getattr(value, "__module__", None) != module.__name__:
+            continue
+        for job_type in job_types:
+            registration = _handlers.get(job_type)
+            if registration is not None and registration.handler is value:
+                found.append((job_type, registration))
+    return sorted(found)
+
+
+def contribute_job_handlers(ctx: Context, *modules: ModuleType) -> None:
+    """把这些模块声明的处理器贡献进 ``JOB_HANDLERS``；插件卸载时自动撤下。"""
+    for module in modules:
+        declared = declared_job_handlers(module)
+        if not declared:
+            raise ValueError(f"模块 {module.__name__} 没有声明任何后台任务处理器")
+        for job_type, registration in declared:
+            ctx.contribute(JOB_HANDLERS, job_type, registration)
+            note_job_type(job_type, title=registration.title)
 
 
 def register_job_handler(
@@ -170,6 +187,8 @@ def register_job_handler(
         if existing is not None and existing.handler is not handler:
             raise RuntimeError(f"后台任务处理器重复注册：{job_type}")
         _handlers[job_type] = RegisteredJobHandler(handler, supported)
+        # 标记在函数上：插件据此把「本模块声明的处理器」贡献进内核注册表
+        handler.__job_types__ = (*getattr(handler, "__job_types__", ()), job_type)  # type: ignore[attr-defined]
         return handler
 
     return decorator
@@ -978,11 +997,18 @@ class JobDispatcher:
         self._last_recovery = 0.0
 
     async def start(self) -> None:
-        await self._recover_expired_jobs()
-        await purge_expired_jobs()
-        now = time.monotonic()
-        self._last_cleanup = now
-        self._last_recovery = now
+        # 调度循环会定期重做这两步。启动期并发写多，慢盘上 SQLite 偶发 database is
+        # locked：为一次可重试的清理让整个应用起不来（还会被入口脚本计成启动失败、
+        # 把好版本标坏）不值，记一笔交给循环立刻重试
+        try:
+            await self._recover_expired_jobs()
+            await purge_expired_jobs()
+            done = time.monotonic()
+        except OperationalError:
+            logger.warning("启动时回收过期任务失败（数据库忙），交给调度循环重试", exc_info=True)
+            done = float("-inf")
+        self._last_cleanup = done
+        self._last_recovery = done
         self._loop_task = asyncio.create_task(self._run_loop(), name="job-dispatcher")
         logger.info("持久化任务执行器已启动：owner=%s parallel=%d", self.owner, self.max_parallel)
 
@@ -1098,14 +1124,21 @@ class JobDispatcher:
         lease_until = now + timedelta(seconds=JOB_LEASE_SECONDS)
         db = get_database()
         async with db.session() as session:
+            conditions = [
+                Job.status.in_([JobStatus.QUEUED.value, JobStatus.RETRY_WAIT.value]),
+                Job.available_at <= now,
+            ]
+            if _bound_handlers is not None:
+                # 内核接管时：所属插件没启用的任务类型留在队列里等；没有任何代码认识的类型
+                # 照旧领取，在执行时阻塞并提示检查更新
+                waiting = _waiting_job_types()
+                if waiting:
+                    conditions.append(Job.job_type.not_in(waiting))
             candidates = list(
                 (
                     await session.execute(
                         select(Job)
-                        .where(
-                            Job.status.in_([JobStatus.QUEUED.value, JobStatus.RETRY_WAIT.value]),
-                            Job.available_at <= now,
-                        )
+                        .where(*conditions)
                         .order_by(Job.priority.desc(), Job.created_at)
                         .limit(10)
                     )
@@ -1197,7 +1230,7 @@ class JobDispatcher:
                 job = await session.get(Job, job_id)
                 if job is None:
                     return
-                registration = _handlers.get(job.job_type)
+                registration = resolve_job_handler(job.job_type)
                 input_data = dict(job.input_data)
             if registration is None:
                 raise JobBlocked(

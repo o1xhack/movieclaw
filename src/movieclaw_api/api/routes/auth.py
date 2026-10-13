@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
@@ -40,6 +41,7 @@ from movieclaw_api.api.deps import (
     require_interactive,
     require_login,
 )
+from movieclaw_api.api.routes.images import WIDTH_QUERY, sized_file
 from movieclaw_api.core.config import get_settings
 from movieclaw_api.exceptions import (
     BadRequestException,
@@ -57,8 +59,12 @@ from movieclaw_api.schemas.auth import (
     DeviceAuthorizeRequest,
     DeviceAuthorizeView,
     DeviceBrief,
+    DeviceCleanupItem,
+    DeviceCleanupRequest,
+    DeviceCleanupView,
     DeviceLoginRequest,
     DeviceLoginView,
+    DevicePushView,
     DeviceRequestView,
     DeviceTokenRequest,
     DeviceTokenView,
@@ -77,6 +83,8 @@ from movieclaw_api.services import avatar as avatar_media
 from movieclaw_api.services import login_devices
 from movieclaw_api.services import members as members_service
 from movieclaw_api.services.auth import Principal, SavedAccount
+from movieclaw_api.services.push import me as push_me
+from movieclaw_api.services.push import registration as push_registration
 from movieclaw_api.settings import (
     AdminAccountSetting,
     AppServerSetting,
@@ -85,6 +93,7 @@ from movieclaw_api.settings import (
 )
 from movieclaw_db.engine import get_database, get_session
 from movieclaw_db.models import JellyfinDevice
+from movieclaw_db.models.base import utcnow
 from movieclaw_db.models.login_device import LoginDevice
 from movieclaw_db.models.member import Member
 
@@ -464,6 +473,7 @@ async def read_avatar(
     request: Request,
     principal: Principal = Depends(require_login),
     account: str | None = Query(default=None, description="读取账号袋里某个账号的头像"),
+    w: int | None = WIDTH_QUERY,
 ) -> FileResponse:
     """直接返回当前主体的头像本体，供 <img> 加载；地址由会话视图的 avatar_url 给出。
 
@@ -479,8 +489,10 @@ async def read_avatar(
     path = avatar_media.find_avatar(stem) if stem else avatar_media.find_avatar()
     if path is None:
         raise NotFoundException("尚未上传头像")
-    return FileResponse(
+    return await sized_file(
         path,
+        source_key=f"account-avatar:{path.name}",
+        w=w,
         media_type=avatar_media.content_type_for(path),
         # URL 带版本号做缓存键，这里可放心让浏览器长期缓存，换头像时 URL 会变。
         headers={"Cache-Control": "private, max-age=31536000"},
@@ -750,7 +762,7 @@ async def create_api_token(payload: ApiTokenCreateRequest) -> ApiResponse[ApiTok
 
 
 async def _verification_uri(request: Request) -> str:
-    """用户应当打开的网页地址（批准页）。
+    """用户应当打开的网页地址（批准页 /activate，独立于「设置 → 设备」）。
 
     优先用配置好的「外部访问地址」——那是用户平时访问 movieclaw 的地址，
     也是他浏览器里已经登录着的那个源。没配置时回落到本次请求的地址：
@@ -760,7 +772,7 @@ async def _verification_uri(request: Request) -> str:
     base = (setting.external_url or "").strip().rstrip("/")
     if not base:
         base = str(request.base_url).rstrip("/")
-    return f"{base}/settings/devices"
+    return f"{base}/activate"
 
 
 @router.post(
@@ -934,9 +946,17 @@ def _device_view(
     principal: Principal,
     owners: dict[int, tuple[str, str]],
     connected: set[int] | None = None,
+    push_channels: list | None = None,
 ) -> LoginDeviceView:
     assert device.id is not None
     spec = login_devices.spec_of(device.kind)
+    push = None
+    # 实时通知设备不靠通道（cloud-push.md §4.1）：服务器没开推送通道时也照常显示
+    if device.kind in push_registration.PUSH_KINDS and (
+        push_channels is not None or device.push_stream
+    ):
+        status, text, _channel = push_me.device_status(device, push_channels or [])
+        push = DevicePushView(status=status, status_text=text)
     username, nickname = owners.get(device.member_id, (f"#{device.member_id}", "已删除的成员"))
     return LoginDeviceView(
         id=login_devices.playback_device_id(device.id),
@@ -957,6 +977,7 @@ def _device_view(
         owner_id=device.member_id,
         owner_username=username,
         owner_nickname=nickname,
+        push=push,
     )
 
 
@@ -1041,8 +1062,22 @@ async def list_devices(
     owner_filter = None if all_members else principal.owner_id
     owners = await _owner_labels(session)
     connected = _connected_device_ids()
+    # 推送状态挂在设备上：没问题时界面什么都不显示，只在收不到通知的设备下面写原因
+    from movieclaw_api.services.push.channels import load_channels
+
+    push_channels = await load_channels()
+    # 服务器自己没开推送（没连 MovieClaw Cloud、也没有自建中继）是整台服务器的事，「通知」页
+    # 已经说了；不在每台手机下面重复挂一行「没有可用的推送通道」
+    if not any(channel.usable for channel in push_channels):
+        push_channels = None
     views = [
-        _device_view(row, principal=principal, owners=owners, connected=connected)
+        _device_view(
+            row,
+            principal=principal,
+            owners=owners,
+            connected=connected,
+            push_channels=push_channels,
+        )
         for row in await login_devices.list_devices(session, member_id=owner_filter)
     ]
     stmt = select(JellyfinDevice)
@@ -1053,6 +1088,80 @@ async def list_devices(
     )
     views.sort(key=_sort_key)
     return ok(views)
+
+
+@router.post(
+    "/devices/cleanup",
+    response_model=ApiResponse[DeviceCleanupView],
+    summary="清理长期没用的设备：一次注销多少天没用过的设备",
+    operation_id="auth.devices.cleanup",
+    openapi_extra={"x-cli-dangerous": "confirm", "x-cli-hidden": True},
+)
+async def cleanup_devices(
+    payload: DeviceCleanupRequest,
+    principal: Principal = Depends(require_interactive),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[DeviceCleanupView]:
+    """按最近活跃（没有就按签发时间）挑出超过 ``inactive_days`` 天没用过的设备并注销。
+
+    正在用的这台、此刻连着的转码器永远不清。``dry_run`` 只列出来，给界面的确认框用——
+    清理就是注销，被清掉的设备要重新登录，确认前得让人看清是哪几台。
+    """
+    from sqlalchemy import select
+
+    from movieclaw_api.services.playback_activity import revoke_device as revoke_player
+
+    if payload.all and not principal.is_admin:
+        raise ForbiddenException("只有管理员能清理全部成员的设备")
+    owner_filter = None if payload.all else principal.owner_id
+    cutoff = utcnow() - timedelta(days=payload.inactive_days)
+    owners = await _owner_labels(session)
+    connected = _connected_device_ids()
+    current_id = principal.device.id if principal.device is not None else None
+    logins = [
+        row
+        for row in await login_devices.list_devices(session, member_id=owner_filter)
+        if row.id != current_id
+        and row.id not in connected
+        and (row.last_seen_at or row.created_at) < cutoff
+    ]
+    stmt = select(JellyfinDevice)
+    if owner_filter is not None:
+        stmt = stmt.where(JellyfinDevice.member_id == owner_filter)
+    players = [
+        row
+        for row in (await session.execute(stmt)).scalars()
+        if (row.last_seen_at or row.created_at) < cutoff
+    ]
+    items = [
+        DeviceCleanupItem(
+            id=login_devices.playback_device_id(row.id or 0),
+            name=row.name,
+            owner_nickname=owners.get(row.member_id, ("", "已删除的成员"))[1],
+        )
+        for row in logins
+    ] + [
+        DeviceCleanupItem(
+            id=f"jf-{row.id}",
+            name=row.device_name or row.client or "播放器",
+            owner_nickname=owners.get(row.member_id, ("", "已删除的成员"))[1],
+        )
+        for row in players
+    ]
+    if payload.dry_run:
+        return ok(DeviceCleanupView(devices=items))
+    for row in logins:
+        await login_devices.revoke(session, row)
+    for row in players:
+        await revoke_player(session, row.device_id)
+    if items:
+        logger.info("清理了 %d 台 %d 天没用过的设备", len(items), payload.inactive_days)
+    message = (
+        f"已注销 {len(items)} 台设备"
+        if items
+        else f"没有超过 {payload.inactive_days} 天没用过的设备"
+    )
+    return ok(DeviceCleanupView(devices=items), message=message)
 
 
 @router.get(
@@ -1098,8 +1207,16 @@ async def revoke_current_device(
     device = await login_devices.get_device(session, principal.device.id)
     if device is None:
         raise NotFoundException("设备不存在或已被注销")
+    member_id, kind, installation_id, name = (
+        device.member_id,
+        device.kind,
+        device.installation_id,
+        device.name,
+    )
     await login_devices.revoke(session, device)
-    return ok(None, message=f"已注销「{device.name}」")
+    # 设备自己退出登录：之后同一台登录回来，不给本人的其他设备推「新设备登录」
+    await login_devices.remember_signed_out(member_id, kind, installation_id)
+    return ok(None, message=f"已注销「{name}」")
 
 
 @router.patch(

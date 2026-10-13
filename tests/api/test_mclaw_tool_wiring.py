@@ -51,7 +51,7 @@ def test_service_map_distinguishes_browsing_from_unified_search() -> None:
 
     for keyword in ("电影", "剧集", "TMDB", "豆瓣", "热门", "高分"):
         assert keyword in discover
-    for keyword in ("titles", "torrents", "library-items", "PT", "种子", "download"):
+    for keyword in ("titles", "torrents", "library 按片名", "PT", "种子", "download"):
         assert keyword in search
 
 
@@ -184,3 +184,11 @@ def test_agent_token_cannot_stop_its_own_session(client: TestClient) -> None:
     )
     assert resp.status_code == 400
     assert "不能停止承载自己的会话" in resp.json()["message"]
+
+
+def test_service_map_points_to_installed_plugin_commands() -> None:
+    """插件接口运行期才挂上、不在构建期 spec 里；目录必须告诉模型去哪找，否则装好的插件它调不到。"""
+    plugins = next(
+        line for line in render_service_map().splitlines() if line.startswith("- plugins ")
+    )
+    assert "plugins --help" in plugins

@@ -40,6 +40,7 @@ ffprobe 门禁**——探测失败的老文件可能只是格式怪，拦下反�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -58,6 +59,7 @@ from sqlmodel import select
 
 from movieclaw_api.services import jobs
 from movieclaw_api.services.foreground import yield_to_foreground
+from movieclaw_api.services.library import acquisition
 from movieclaw_api.services.library.bluray import (
     disc_playlist_record,
     disc_playlist_stale,
@@ -109,7 +111,6 @@ from movieclaw_api.services.subtitle_gen.extract import cache_dir as subtitle_ca
 from movieclaw_api.services.task_state import TaskState
 from movieclaw_db.engine import get_database, refresh_query_statistics
 from movieclaw_db.models import (
-    DownloadHint,
     FileSource,
     FileState,
     Job,
@@ -430,6 +431,9 @@ class ScanSummary:
     # 本轮被换下的旧条目（临时本地身份转正、身份改挂）：台账收口后交给
     # 孤儿清理（对外接口不暴露）
     reanchored_item_ids: set[int] = field(default_factory=set)
+    # 本轮新入账的文件（新文件与失联回归）：(行 id, 条目, 季, 集, 是否 strm)；扫描收尾
+    # 发一次 ``library.files.added`` 给插件（对外接口不暴露）
+    added_files: list[tuple[int, int | None, int, int, bool]] = field(default_factory=list)
 
 
 @dataclass
@@ -454,12 +458,43 @@ class RootPathReconcilePreview:
     disk_files_to_delete: int = 0
 
 
+async def emit_files_added(
+    library_id: int, added: list[tuple[int, int | None, int, int, bool]]
+) -> None:
+    """新入账的文件（``library.files.added``，domain-events.md §8）：例如网盘预探插件按它探规格。
+
+    台账行已各自提交，事件不在业务事务里：``publish_now``。
+    """
+    if not added:
+        return
+    from movieclaw_api import event_refs, events
+    from movieclaw_sdk.events import LIBRARY_FILES_ADDED, AddedFile, FilesAdded
+
+    def build() -> FilesAdded:
+        files = []
+        for i, m, s, e, strm in added:
+            unit = event_refs.unit(s, e)
+            files.append(
+                AddedFile(
+                    id=i,
+                    media_item_id=m,
+                    season=unit.season if unit else None,
+                    episode=unit.episode if unit else None,
+                    strm=strm,
+                )
+            )
+        return FilesAdded(library_id=library_id, files=tuple(files))
+
+    await events.publish_now(LIBRARY_FILES_ADDED, build)
+
+
 def scan_summary_payload(summary: ScanSummary) -> dict[str, object]:
     """生成可持久化的扫描结论；内部调度字段不进入 Job JSON。"""
     payload = asdict(summary)
     payload.pop("recheck_delay_seconds", None)
     payload.pop("identified_item_ids", None)
     payload.pop("reanchored_item_ids", None)
+    payload.pop("added_files", None)
     return payload
 
 
@@ -673,12 +708,23 @@ async def enqueue_scan_job(
     actor_name: str | None = None,
     actor_id: str | None = None,
     origin: str = "web",
+    scope_paths: list[str] | None = None,
 ) -> jobs.CreateJobResult:
-    """创建用户可观察、可取消、可跨重启恢复的媒体库扫描作业。"""
+    """创建用户可观察、可取消、可跨重启恢复的媒体库扫描作业。
+
+    ``scope_paths``：只扫这些条目目录（库根下第一级的绝对路径，见 ``scope_entries``）。
+    范围扫描与监听触发的扫描同一语义：不补探存量规格；范围解析存疑时退回整库。
+    """
     input_data: dict[str, object] = {
         "library_id": library_id,
-        "backfill_existing_specs": True,
+        "backfill_existing_specs": not scope_paths,
     }
+    dedupe_key = f"library.scan:{library_id}"
+    if scope_paths:
+        input_data["scope_paths"] = sorted(scope_paths)
+        # 不同范围各自排队；整库扫描在跑时它覆盖了范围扫描，返回已有作业
+        digest = hashlib.sha1("\n".join(sorted(scope_paths)).encode()).hexdigest()[:12]
+        dedupe_key = f"library.scan:{library_id}:scope:{digest}"
     if reconcile_root_change:
         input_data.update(
             reconcile_root_change=True,
@@ -691,7 +737,7 @@ async def enqueue_scan_job(
         subject=library_name,
         input_data=input_data,
         resources=[jobs.ResourceRef("library", library_id)],
-        dedupe_key=f"library.scan:{library_id}",
+        dedupe_key=dedupe_key,
         conflict_policy="return_existing",
         handler_revision="library.scan.v1",
         max_attempts=3,
@@ -845,6 +891,7 @@ async def scan_library(
         return summary
     finally:
         _scan_tasks.finish(library_id, result=(utcnow(), summary))
+        await emit_files_added(library_id, summary.added_files)
         # 暂缓过文件的扫描要自己安排补扫：写入结束后不会再有事件叫醒我们
         # （手动停止的不自动补扫——用户的意图是"别扫了"）
         if summary.deferred and not summary.cancelled and finished_normally:
@@ -881,6 +928,9 @@ async def _run_scan_job(
         "job_context": context,
         "raise_unexpected": True,
     }
+    scope = input_data.get("scope_paths")
+    if isinstance(scope, list) and scope:
+        scan_kwargs["scope_paths"] = {str(path) for path in scope}
     if input_data.get("reconcile_root_change") is True:
         roots = input_data.get("previous_root_paths")
         new_roots = input_data.get("reconcile_new_root_paths")
@@ -919,6 +969,21 @@ async def _run_scan_job(
     if summary.errors:
         message += f"，{len(summary.errors)} 个问题已记录"
     return {"message": message, **payload}
+
+
+def scope_entries(library: Library, paths: list[str]) -> list[str]:
+    """把任意路径换成它所在的条目目录（库根下第一级的绝对路径）；不在任何库根之下抛 ValueError。"""
+    roots = [Path(r) for r in library.root_paths]
+    entries: set[str] = set()
+    for raw in paths:
+        target = Path(raw)
+        if not target.is_absolute():
+            raise ValueError(f"必须是绝对路径：{raw}")
+        root = next((r for r in roots if target != r and target.is_relative_to(r)), None)
+        if root is None:
+            raise ValueError(f"不在「{library.name}」的任何根路径之下：{raw}")
+        entries.add(str(root / target.relative_to(root).parts[0]))
+    return sorted(entries)
 
 
 async def _resolve_scope(
@@ -1008,6 +1073,9 @@ async def _scan(
         episodes_cache: dict[Path, int | None] = {}
         # 下载线索：手动下载提交时锚定的「条目目录 → 副标题」（拼音名种子的救赎）
         hints = await _load_hints(session)
+        # 原地下载的来源种子：下载记录的「保存目录/内容名」→ 下载器任务（plugin-phase2a.md §5.1），
+        # 由获取领域给（library-boundary.md §10）
+        downloads = await acquisition.current().download_roots(session)
         # 一轮扫描里首次发现的所有文件共享批次号。已存在/回归的台账行不会
         # 覆盖原批次，因此「最近添加」只描述真正的新入账，不把重扫冒充新增。
         added_batch_id = uuid4().hex
@@ -1296,6 +1364,7 @@ async def _scan(
                     dir_files.get(str(file.parent)),
                     is_disc=is_disc,
                     check_media_change=(backfill_existing_specs or path_str in reprobe_paths),
+                    session=session,
                 ):
                     rows_refreshed += 1
                 # 本地来源：此前标题来自文件名推断，目录里新出现了 sidecar NFO
@@ -1319,12 +1388,16 @@ async def _scan(
                 continue
             # 完整性检测：mtime 太新 = 疑似写入中（下载/拷贝进行时），本轮
             # 暂缓入账、稍后补扫——库不假设目录用途，根路径完全可能同时是
-            # 下载目录。mtime 在未来超出一个窗口视为时钟异常，照常入账
+            # 下载目录。mtime 在未来超出一个窗口视为时钟异常，照常入账。
+            # strm 不等：它按文件名识别、播放时才读内容，「写了一半」对台账无害；
+            # 网盘插件写完 .strm 立刻触发的扫描不该再白等五分钟
             try:
                 age = now_ts - (await asyncio.to_thread(file.stat)).st_mtime
             except OSError:
                 age = NEW_FILE_QUIET_SECONDS  # 瞬时消失/不可读：交给后续流程处理
-            if -NEW_FILE_QUIET_SECONDS <= age < NEW_FILE_QUIET_SECONDS:
+            if -NEW_FILE_QUIET_SECONDS <= age < NEW_FILE_QUIET_SECONDS and (
+                is_disc or file.suffix.lower() != STRM_EXT
+            ):
                 summary.deferred += 1
                 remaining = NEW_FILE_QUIET_SECONDS - age
                 min_remaining = (
@@ -1346,6 +1419,7 @@ async def _scan(
                     summary,
                     is_disc=is_disc,
                     hint=_hint_for(file, hints),
+                    torrent=_download_for(file, downloads),
                     existing=existing,
                     dir_names=dir_files.get(str(file.parent)),
                     added_batch_id=added_batch_id,
@@ -2695,6 +2769,7 @@ async def _merge_same_file_rows(
         "external_subtitles",
         "media_source",
         "release_group",
+        "release_name",
         "site_id",
         "torrent_id",
     ):
@@ -2782,6 +2857,7 @@ async def _refresh_known_row(
     *,
     is_disc: bool,
     check_media_change: bool,
+    session: AsyncSession | None = None,
 ) -> bool:
     """秒过行的增量刷新：外挂字幕重发现 +（点名时）视频变化重探。
 
@@ -2791,8 +2867,9 @@ async def _refresh_known_row(
       不触碰视频本体；旧行（NULL）顺带回填。原盘条目恒 []（§2.1）；
     - 视频变化重探（§2.4）：只在 ``check_media_change`` 时 stat 视频本体，
       (size, mtime) 确认变化才 ffprobe；**探测成功才回写**规格与新鲜度键
-      ——半截写入的替换文件探测会失败，保留旧值让下一轮重试。strm 无
-      媒体流，不参与重探。
+      ——半截写入的替换文件探测会失败，保留旧值让下一轮重试。strm 不在扫描里
+      探网盘，只看 .strm 是否被改写：直链换了文件就清空规格，交给首播 / 预探重探
+      （plugin-strm-prefetch.md §4）。
     """
     changed = False
     if is_disc:
@@ -2805,6 +2882,11 @@ async def _refresh_known_row(
         changed = True
 
     is_strm = not is_disc and file.suffix.lower() == STRM_EXT
+    if check_media_change and is_strm and session is not None:
+        from movieclaw_api.services.playback.strm_probe import refresh_rewritten_strm
+
+        if await refresh_rewritten_strm(session, row, file):
+            changed = True
     if check_media_change and not is_disc and not is_strm:
         try:
             st = await asyncio.to_thread(file.stat)
@@ -2824,6 +2906,8 @@ async def _refresh_known_row(
                 row.resolution = spec.resolution
                 row.video_codec = spec.video_codec
                 row.hdr = spec.hdr
+                row.dv_profile = spec.dv_profile
+                row.dv_bl_compatible = spec.dv_bl_compatible
                 row.bit_depth = spec.bit_depth
                 row.duration_seconds = spec.duration_seconds
                 row.bit_rate = spec.bit_rate
@@ -2888,6 +2972,7 @@ async def _ingest_file(
     *,
     is_disc: bool = False,
     hint: _SubtitleHint | None = None,
+    torrent: object | None = None,
     existing: LibraryFile | None = None,
     dir_names: list[str] | None = None,
     added_batch_id: str,
@@ -3055,7 +3140,7 @@ async def _ingest_file(
         [] if is_disc else await discover_external_subtitles_async(file, dir_names)
     )
     assert library.id is not None
-    await repo.upsert_by_path(
+    scanned_row = await repo.upsert_by_path(
         LibraryFile(
             library_id=library.id,
             media_item_id=item_id,
@@ -3068,6 +3153,8 @@ async def _ingest_file(
             resolution=spec.resolution if spec else None,
             video_codec=spec.video_codec if spec else None,
             hdr=spec.hdr if spec else None,
+            dv_profile=spec.dv_profile if spec else None,
+            dv_bl_compatible=spec.dv_bl_compatible if spec else None,
             bit_depth=spec.bit_depth if spec else None,
             duration_seconds=spec.duration_seconds if spec else None,
             bit_rate=spec.bit_rate if spec else None,
@@ -3081,7 +3168,14 @@ async def _ingest_file(
             external_subtitles=external_subtitles,
             media_source=scanned_media_source(attrs, container) if profile.scraped else None,
             release_group=attrs.release_group if profile.scraped else None,
+            # 扫描不知道入库前的原名，以发现时的文件名为准（只补空不覆盖，
+            # 已有快照的行重扫不变）；命名模板 {release_name} 的取值
+            release_name=file.stem,
             source=FileSource.SCANNED,
+            # 兼容列双写（下一版删，library-boundary.md §5）：在那之前按获取领域现在的标记形态
+            # (info_hash, 下载器) 读；删掉以后媒体库不再解读标记
+            info_hash=torrent[0] if torrent else None,  # type: ignore[index]
+            downloader_id=torrent[1] if torrent else None,  # type: ignore[index]
             added_batch_id=added_batch_id,
             origin=origin,
             # 临时本地身份的行同时带着"为什么没认出"：清单与角标据此表达
@@ -3097,12 +3191,19 @@ async def _ingest_file(
         # 同路径旧行调用方已经持有（扫描开场的整库快照），不必再查一次
         existing=existing,
     )
+    if scanned_row.id is not None and (existing is None or existing.state == FileState.MISSING):
+        strm = not is_disc and file.suffix.lower() == STRM_EXT
+        summary.added_files.append((scanned_row.id, item_id, season, episode, strm))
+    if torrent is not None:
+        # 原地下载按下载记录的保存路径反查到的来源：交获取领域记下（种子关联归下载领域，
+        # library-boundary.md §5）
+        await acquisition.current().file_recorded(session, scanned_row.id, torrent)
+        # 台账行由 upsert_by_path 当场提交；来源记录同样当场提交，不靠后续写入顺带
+        await session.commit()
     if item_id is not None:
         # 库存对账：单元在库成立即关闭对应的订阅工单（订阅止于投递，
-        # 完成状态由库存推导；文件回归同样适用）
-        from movieclaw_api.services.subscription import close_fulfilled_wanted
-
-        await close_fulfilled_wanted(session, item_id)
+        # 完成状态由库存推导；文件回归同样适用）——工单归获取领域
+        await acquisition.current().identity_changed(session, gained={item_id})
 
 
 # ---------------------------------------------------------------------------
@@ -3645,19 +3746,31 @@ class _SubtitleHint:
 
 
 async def _load_hints(session) -> dict[str, _SubtitleHint]:
-    """加载全部下载线索（不解析），按规范化后的目录建索引，供 _hint_for 逐级上溯查找。"""
-    rows = (
-        await session.execute(
-            select(DownloadHint.save_path, DownloadHint.subtitle).order_by(DownloadHint.id)
-        )
-    ).all()
+    """加载全部下载线索（不解析），按规范化后的目录建索引，供 _hint_for 逐级上溯查找。
+
+    线索由获取领域给（library-boundary.md §10）；没有获取领域时没有线索。
+    """
     hints: dict[str, _SubtitleHint] = {}
-    for save_path, subtitle in rows:
+    for save_path, subtitle in await acquisition.current().title_hints(session):
         # 与旧的「Path(save_path.rstrip("/")) in file.parents」判定同一口径（去尾斜杠、
         # 折叠重复分隔符；"/" 规范成 "." 永不命中）；规范化后重名的线索保留先写入的
         # 一条，与旧排序的结果一致
         hints.setdefault(str(Path(save_path.rstrip("/"))), _SubtitleHint(save_path, subtitle))
     return hints
+
+
+def _download_for(file: Path, roots: dict[str, object]) -> object | None:
+    """文件或某层上级目录正是某个下载器任务的内容根 → 该任务的来源标记。
+
+    单文件种子的内容根是文件本身。
+    """
+    if not roots:
+        return None
+    for candidate in (file, *file.parents):
+        hit = roots.get(str(candidate))
+        if hit is not None:
+            return hit
+    return None
 
 
 def _hint_for(file: Path, hints: dict[str, _SubtitleHint]) -> _SubtitleHint | None:
@@ -4495,7 +4608,7 @@ async def _reidentify(
         state.total = len(rows)
         new_ids: set[int] = set()
         displaced: set[int] = set()
-        lost_sources: set[tuple[str, str]] = set()
+        moved_file_ids: list[int] = []
         for done, row in enumerate(rows, start=1):
             state.processed = done
             if row.state != FileState.IN_PLACE:
@@ -4544,8 +4657,8 @@ async def _reidentify(
                     (item.id, season_number, episode_number),  # type: ignore[arg-type]
                 )
                 displaced.add(row.media_item_id)
-                if row.site_id and row.torrent_id:
-                    lost_sources.add((row.site_id, row.torrent_id))
+                if row.id is not None:
+                    moved_file_ids.append(row.id)
             row.media_item_id = item.id if item is not None else None
             row.unidentified_reason = reason if keep_failure else None
             row.unidentified_code = identified.code if keep_failure else None
@@ -4571,20 +4684,18 @@ async def _reidentify(
             summary.changed = new_id != media_item_id
             new_item = await session.get(MediaItem, new_id)
             summary.new_title = new_item.title if new_item is not None else None
-            # 库存对账：单元归属的新条目若有订阅工单，在库成立即关闭
-            from movieclaw_api.services.subscription import close_fulfilled_wanted
-
-            await close_fulfilled_wanted(session, new_id)
         elif new_ids:
             # 分裂成多个条目（如剧集目录混入了别的剧）：不给单一跳转目标
             summary.changed = True
-        # 库存对账的另一半：被腾空的旧条目单元已不在库，工单退回继续找。
-        # 重新识别是用户主动翻案（白名单内的身份变更事件），与全量扫描把
-        # 文件标 missing 完全不同，见 reopen_unfulfilled_wanted 的文档
-        for displaced_id in displaced:
-            from movieclaw_api.services.subscription import reopen_unfulfilled_wanted
-
-            await reopen_unfulfilled_wanted(session, displaced_id, lost_sources=lost_sources)
+        # 库存对账（两个方向，交获取领域）：单一新条目的单元在库成立、关工单；
+        # 被腾空的旧条目单元已不在库，工单退回继续找。重新识别是用户主动翻案
+        # （白名单内的身份变更事件），与全量扫描把文件标 missing 完全不同
+        await acquisition.current().identity_changed(
+            session,
+            gained={summary.new_media_item_id} if summary.new_media_item_id else set(),
+            displaced=displaced,
+            moved_file_ids=moved_file_ids,
+        )
         await LibraryRepository(session).refresh_stats([library_id])
     logger.info(
         "媒体库 #%s 条目 #%s 重新识别完成：%d 个文件（识别 %d / 待识别 %d），新身份 %s%s",

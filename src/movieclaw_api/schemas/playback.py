@@ -9,6 +9,7 @@ from pydantic import Field
 
 from movieclaw_api.schemas.base import BaseModel
 from movieclaw_api.schemas.library import LibraryItemView
+from movieclaw_api.schemas.reels import ReelClipProgressView
 from movieclaw_media.models import MediaKind
 
 
@@ -32,6 +33,18 @@ class UpNextItemView(BaseModel):
     )
     backdrop_url: str | None
     episode_still_url: str | None
+    # 以下几项给电视首页的大图区用（docs/design/tvos-app.md §3.1）。都可为空：
+    # 新版客户端连旧版服务端时缺这几个键也能照常解析。
+    # 分集剧照的本地资产只存 w300 小图（一部剧几百集，存原图太占盘），手机卡片够用；
+    # 电视卡片在 4K 下有 920px 宽，另给 TMDB 原图，由图片代理按需抓取并缓存
+    episode_still_original_url: str | None = Field(
+        default=None, description="分集剧照的 TMDB 原图（电视等大屏用）"
+    )
+    logo_url: str | None = Field(default=None, description="片名 Logo（透明底，本地资产优先）")
+    overview: str | None = Field(
+        default=None, description="简介：剧集取卡片这一集的（没有则用整部剧的），电影取影片的"
+    )
+    genres: list[str] | None = Field(default=None, description="类型（如「剧情」「科幻」）")
     # 季集是**卡片这一集**的，不是最近播放那一集的：卡片指向下一集时，
     # 标题、剧照、时长、详情落点都跟着走
     season_number: int
@@ -362,6 +375,15 @@ class ClientCapabilityIn(BaseModel):
     #: 能经目录取流接口读原盘目录：多剪辑原盘给档 0 目录直推（会话的 ``stream_url``
     #: 是目录清单地址，决策带主播放列表名），NAS 不起 ffmpeg
     disc_folder: bool = False
+    #: 能在本机切换内封音轨（Android TV 的 ExoPlayer）：直出原文件时自己选中计划里的那条，
+    #: 服务端不再为「选中的不是默认轨」重封装。浏览器只放默认轨，不申报
+    local_tracks: bool = False
+    #: 能完整呈现的杜比视界 profile（本机杜比视界解码器支持、屏幕支持杜比视界）：原样直通。
+    #: 老客户端不带 = 空 = 杜比视界一律转码（与原来相同）
+    dolby_vision_profiles: list[int] = []
+    #: 解不了杜比视界时能退回基础层播放的 profile（Android TV 的 ExoPlayer 对 P8 改用 HEVC
+    #: 解码器）：基础层兼容且屏幕能直出 HDR 时直通
+    dolby_vision_base_layer_profiles: list[int] = []
 
 
 class PlaybackDecideRequest(BaseModel):
@@ -435,6 +457,9 @@ class SubtitlePlanView(BaseModel):
     is_default: bool = False
     #: 本机 AI 生成的字幕（翻译/双语）。播放器的字幕菜单据此打「AI 生成」标
     is_ai: bool = False
+    title: str | None = None
+    # 可选以兼容旧服务端：Apple 客户端缺字段时按非强制轨展示。
+    is_forced: bool | None = None
 
 
 class PlaybackDecisionView(BaseModel):
@@ -587,10 +612,12 @@ class PlaybackSegmentView(BaseModel):
     - ``intro`` 片头：在区间里显示「跳过片头」，点了跳到 ``end_ms``；
     - ``outro`` 片尾：到 ``start_ms`` 就提前显示「即将播放下一集」；``to_end`` 为假时
       片尾后面还有内容（下集预告、彩蛋），按钮是「跳过片尾」；
-    - ``other`` 其他重复段（片头前的冠名广告、发行许可）：显示「跳过」。
+    - ``ad`` 已确认的广告、``preview`` 已确认的预告：分别显示「跳过广告」「跳过预告」，
+      手动跳到段尾；
+    - ``other`` 尚未明确分类的重复段：显示「跳过此段」，不猜测为广告或片头。
     """
 
-    type: Literal["intro", "outro", "other"]
+    type: Literal["intro", "outro", "ad", "preview", "other"]
     start_ms: int
     end_ms: int
     #: 片尾一直放到文件结尾（只有 outro 有意义）
@@ -643,6 +670,8 @@ class PlaybackSessionView(BaseModel):
     #: 可直接喂给 <video src> 或 hls.js 的地址，已带签名 token。
     #: 决策不是 plan 时为 None。
     stream_url: str | None = None
+    #: 转码器可在整段完成前输出完整 MP4 片段，浏览器可渐进解码。
+    progressive_segments: bool = False
     #: 会话时间轴的零点在文件里的位置。**文件时间 = start_ms + currentTime**——
     #: 全前端只有这一处换算（见 ffmpeg_args 模块文档的时间轴取舍）。
     #: timeline="file" 时它退化为「建议的起播位置」：分片时间戳本身就是
@@ -684,8 +713,8 @@ class PlaybackSessionView(BaseModel):
 class PlaybackSessionRequest(PlaybackDecideRequest):
     """开会话请求：在决策请求上多一个起播位置。"""
 
-    #: 从文件的哪个位置开始。**None = 服务端按观看状态定**：看完的从头播，
-    #: 没看完的接续播点——分享出去的链接因此天然「各看各的进度」。显式给值
+    #: 从文件的哪个位置开始。**None = 服务端按观看状态定**：有续播点就接着播
+    #: （含看完后重看到一半的），没有就从头——分享出去的链接因此天然「各看各的进度」。显式给值
     #: （含 0）原样照办：seek 重开、「从头开始」都走这条路。
     start_ms: int | None = None
     #: 播放编号（docs/design/playback-qoe.md §2）：App 在用户点下时生成，断线重连、原位重开、
@@ -799,6 +828,12 @@ class PlaybackPolicyView(BaseModel):
     trickplay_enabled: bool = True
     #: 转码产物是否保留供续播、重看复用（§B）。关闭即会话结束即删。
     transcode_cache_enabled: bool = True
+    #: 片段预切（docs/design/reels.md §8）：预告与刷片放预先切好的 1080p 小文件。
+    #: 声明成可空：生成的 Swift / Kotlin 模型把非空字段当必有，新 App 连老服务器（没有这一项）
+    #: 时整个策略解码失败，连软件转码的同意弹窗都会坏
+    reel_clips_enabled: bool | None = False
+    #: 片段预切进度（开关开着才有）：电影与剧集一共几部、切好了几部、队列状态
+    reel_clips_progress: ReelClipProgressView | None = None
     #: 实测结果而非配置项——用户改不了自己有没有显卡。前端据此说明
     #: 「无可用硬件加速，HDR 片源需要软件转码」这类结论。
     hardware_available: bool = False
@@ -813,6 +848,7 @@ class PlaybackPolicyPayload(BaseModel):
     software_transcode_enabled: bool | None = None
     trickplay_enabled: bool | None = None
     transcode_cache_enabled: bool | None = None
+    reel_clips_enabled: bool | None = None
 
 
 class PlaybackFontsView(BaseModel):

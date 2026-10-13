@@ -1141,10 +1141,13 @@ async def list_libraries(
 
     不暴露的形态（图片库，能力位 ``jellyfin_exposed=False``）在这里统一挡掉，
     五个调用方（视图、计数、最新媒体……）不必各自判断。
+
+    按控制台拖好的展示顺序返回（与 Web 端库列表同一口径，issue #587）。
     """
     q = select(Library).where(Library.kind.not_in(_hidden_kinds()))  # type: ignore[union-attr]
     if visible_ids is not None:
         q = q.where(Library.id.in_(visible_ids))
+    q = q.order_by(Library.sort_order.asc(), Library.id.asc())  # type: ignore[union-attr]
     return list((await session.execute(q)).scalars())
 
 
@@ -1716,7 +1719,7 @@ def library_view_dto(
     return dto
 
 
-def collections_view_dto(ctx: DtoContext) -> dict[str, Any]:
+def collections_view_dto(ctx: DtoContext, cover_tag: str | None = None) -> dict[str, Any]:
     """「合集」聚合视图（docs/design/library-collections.md 4.3）。
 
     **协议侧不照搬产品侧的「合集挂在库下面」**，而是走 Jellyfin 惯例的一个顶层
@@ -1732,7 +1735,8 @@ def collections_view_dto(ctx: DtoContext) -> dict[str, Any]:
     dto = _common(ctx, guid, "合集", "CollectionFolder", "Unknown")
     dto["IsFolder"] = True
     dto["CollectionType"] = "boxsets"
-    dto["ImageTags"] = {}
+    # 封面 = 各可见合集封面海报的货架拼贴；tag 即素材指纹，取图时凭它找回产物
+    dto["ImageTags"] = {"Primary": cover_tag} if cover_tag else {}
     dto["BackdropImageTags"] = []
     dto["ParentId"] = root_guid()
     dto["UserData"] = {
@@ -2156,7 +2160,10 @@ def media_source_dto(f: LibraryFile, *, resolve_strm: bool = False) -> dict[str,
     而浏览场景根本用不到直链，Path 保留 strm 占位路径即可。
     """
     from movieclaw_jellyfin.ids import media_source_guid
-    from movieclaw_playback.streaming import resolve_strm_url
+
+    # 别名：本函数的布尔参数就叫 resolve_strm，同名导入会把它覆盖成恒真的函数对象
+    from movieclaw_playback.streaming import local_strm_container, strm_needs_relay
+    from movieclaw_playback.streaming import resolve_strm as read_strm
 
     streams = media_streams_dto(f)
     audio_streams = [s for s in streams if s["Type"] == "Audio"]
@@ -2217,9 +2224,28 @@ def media_source_dto(f: LibraryFile, *, resolve_strm: bool = False) -> dict[str,
         source["Protocol"] = "Http"
         source["IsRemote"] = True
         if resolve_strm:
-            url = resolve_strm_url(f.file_path)
-            if url is None:
+            link = read_strm(f.file_path)
+            if link is None:
                 return None
+            if isinstance(link, Path):
+                # 指向服务器挂载目录里的文件：按本地文件呈现，播放器走 /Videos/{id}/stream
+                try:
+                    source["Size"] = link.stat().st_size
+                except OSError:
+                    return None  # 挂载刚掉线：剔除这个版本，与读不出 strm 一样
+                source["Protocol"] = "File"
+                source["IsRemote"] = False
+                source["Container"] = local_strm_container(f.container, link)
+                return {k: v for k, v in source.items() if v is not None}
+            url = link.url
+            if strm_needs_relay(url, link.headers):
+                # 内网 / 回环 / 容器服务名的直链客户端连不上：按本地文件呈现，播放器走
+                # /Videos/{id}/stream，由服务端替它跟跳转或转发（streaming.strm_redirect_target）
+                source["Protocol"] = "File"
+                source["IsRemote"] = False
+                if f.container and f.container != "strm":
+                    source["Container"] = f.container
+                return {k: v for k, v in source.items() if v is not None}
             source["Path"] = url
             ext = Path(url.split("?", 1)[0]).suffix.lstrip(".").lower()
             if ext:

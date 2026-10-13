@@ -17,12 +17,11 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from movieclaw_api.api.deps import require_admin
 from movieclaw_api.api.routes.library_recycle import PAGE_LIMIT_MAX, _audio_label, _summary
-from movieclaw_api.core.config import get_settings
 from movieclaw_api.exceptions import BadRequestException, NotFoundException
 from movieclaw_api.schemas.library import (
     DuplicateFilesData,
@@ -50,7 +49,7 @@ from movieclaw_api.services.library.duplicates import (
     ResolveOutcome,
     resolve_unit,
 )
-from movieclaw_api.services.media_server_notify import notify_media_server_refresh
+from movieclaw_api.services.tmdb_images import item_poster_url, local_media_files
 from movieclaw_db.engine import get_session
 from movieclaw_db.repositories.library_repo import LibraryRepository
 from movieclaw_media.models import MediaKind
@@ -83,7 +82,7 @@ def _file_view(f: DupFile) -> DuplicateFileView:
     )
 
 
-def _item_view(d: DupItem) -> DuplicateItemView:
+def _item_view(d: DupItem, poster_file: str | None = None) -> DuplicateItemView:
     item = d.item
     return DuplicateItemView(
         library=TrashedLibraryRefView(id=d.library.id, name=d.library.name),  # type: ignore[arg-type]
@@ -92,11 +91,7 @@ def _item_view(d: DupItem) -> DuplicateItemView:
             title=item.title,
             year=item.year,
             kind=MediaKind(item.kind),
-            poster_url=(
-                f"{get_settings().tmdb_image_base_url.rstrip('/')}/w185{item.poster_path}"
-                if item.poster_path
-                else None
-            ),
+            poster_url=item_poster_url(item.poster_path, poster_file),
         ),
         seasons=[
             DuplicateSeasonView(
@@ -159,12 +154,9 @@ def _result(outcome: ResolveOutcome) -> TrashedBatchResultView:
     )
 
 
-async def _after_cleanup(
-    session: AsyncSession, outcome: ResolveOutcome, background_tasks: BackgroundTasks
-) -> None:
+async def _after_cleanup(session: AsyncSession, outcome: ResolveOutcome) -> None:
     if outcome.done:
         await LibraryRepository(session).refresh_stats(list(outcome.library_ids))
-        background_tasks.add_task(notify_media_server_refresh)
 
 
 @router.get(
@@ -205,6 +197,7 @@ async def list_duplicate_files(
         limit=limit,
         offset=offset,
     )
+    files = await local_media_files(session, [d.item.id for d in items])
     return ok(
         DuplicateFilesData(
             scan=_scan_view(state),
@@ -214,7 +207,9 @@ async def list_duplicate_files(
             total_files=summary.total_files,
             total_bytes=summary.total_bytes,
             total_items=total_items,
-            items=[_item_view(d) for d in items],
+            items=[
+                _item_view(d, files.get(d.item.id or -1, (None, None, None))[0]) for d in items
+            ],
         )
     )
 
@@ -261,7 +256,6 @@ async def start_duplicate_scan(
 )
 async def resolve_duplicates(
     payload: DuplicateResolvePayload,
-    background_tasks: BackgroundTasks,
     principal: Principal = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[TrashedBatchResultView]:
@@ -308,7 +302,7 @@ async def resolve_duplicates(
         )
     if payload.keep_all:
         return ok(_result(outcome), message=f"已标记「都留着」：{outcome.done} 个文件不再列为重复")
-    await _after_cleanup(session, outcome, background_tasks)
+    await _after_cleanup(session, outcome)
     return ok(
         _result(outcome), message=_summary("移入回收站", outcome.done, len(outcome.failed), 0)
     )
@@ -323,7 +317,6 @@ async def resolve_duplicates(
 )
 async def resolve_all_duplicates(
     payload: DuplicateResolveAllPayload,
-    background_tasks: BackgroundTasks,
     principal: Principal = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[TrashedBatchResultView]:
@@ -340,7 +333,7 @@ async def resolve_all_duplicates(
     )
     if payload.keep_all:
         return ok(_result(outcome), message=f"已标记「都留着」：{outcome.done} 个文件不再列为重复")
-    await _after_cleanup(session, outcome, background_tasks)
+    await _after_cleanup(session, outcome)
     if outcome.oversized_units and not outcome.done:
         # 单个单元就超过整批上限：再点多少次也轮不到它。出路是逐单元决定
         # （那条路径没有批量上限），所以这里必须说清楚，而不是回一句

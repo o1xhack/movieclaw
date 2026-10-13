@@ -27,15 +27,21 @@ import time
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from movieclaw_api.services.playback import events as playback_events
 from movieclaw_api.services.playback.track_context import unit_files_with_contexts
-from movieclaw_api.services.webhook import emit_events
 from movieclaw_db.models import LibraryFile, MediaItem, PlaybackLog, PlaybackState
 from movieclaw_db.models.base import utcnow
 from movieclaw_playback import activity
 from movieclaw_playback import state as playback_state
-from movieclaw_playback.events import ClientInfo, build_playback_event
+from movieclaw_playback.events import ClientInfo
 from movieclaw_playback.state import Unit
 from movieclaw_playback.streaming import stop_device_streams
+from movieclaw_sdk.events import (
+    PLAYBACK_COMPLETED,
+    PLAYBACK_PROGRESS,
+    PLAYBACK_STARTED,
+    PLAYBACK_STOPPED,
+)
 
 #: 网页播放器在 webhook 与活动页里的客户端名。与 Jellyfin 客户端上报的 name
 #: 同一位置，下游据此区分「这次播放来自哪儿」。
@@ -43,16 +49,21 @@ WEB_CLIENT_NAME = "MovieClaw Web"
 
 #: 原生 App 与网页共用同一套登录会话与上报接口，只能靠 User-Agent 区分：App 的每个请求都带
 #: ``MovieClaw-<平台>/<版本> (<机型>; <系统> <系统版本>; build <构建号>)``。
-#: 平台 → (客户端名, 认不出机型时的设备名)。Apple TV / Android 版尚未开发，先把名字定下来。
+#: 平台 → (客户端名, 认不出机型时的设备名)。
 _APP_CLIENTS: dict[str, tuple[str, str]] = {
     "iOS": ("MovieClaw iOS", "iPhone"),
     "tvOS": ("MovieClaw Apple TV", "Apple TV"),
+    # Mac 的机型位报的是 uname 的 arm64 / x86_64，认不出具体型号，设备名统一叫「Mac」
+    "macOS": ("MovieClaw Mac", "Mac"),
     "Android": ("MovieClaw Android", "Android"),
+    "AndroidTV": ("MovieClaw Android TV", "Android TV"),
 }
 _APP_USER_AGENT = re.compile(
-    r"MovieClaw-(?P<platform>iOS|tvOS|Android)/(?P<version>[0-9A-Za-z._+-]+)"
+    r"MovieClaw-(?P<platform>iOS|tvOS|macOS|AndroidTV|Android)/(?P<version>[0-9A-Za-z._+-]+)"
 )
-_APP_SYSTEM = re.compile(r"\b(?P<os>iOS|iPadOS|tvOS|Android) (?P<version>[0-9.]+)")
+_APP_SYSTEM = re.compile(r"\b(?P<os>iOS|iPadOS|tvOS|macOS|Android) (?P<version>[0-9.]+)")
+#: UA 括号里的第一段机型位（Android 报的是 ``Build.MODEL``，如「Pixel 9」）
+_APP_MODEL = re.compile(r"MovieClaw-[^/]+/\S+ \((?P<model>[^;)]+);")
 
 #: 网页端设备标识的命名空间前缀：与 Jellyfin 设备 id 同在一张注册表里，
 #: 加前缀避免两类标识意外撞车。
@@ -132,7 +143,7 @@ def web_device_id(
 def web_client_info(*, device_id: str, user_agent: str | None) -> ClientInfo:
     """网页播放器 / 原生 App 的客户端信息；``device_id`` 须已经过 :func:`web_device_id`。
 
-    原生 App（iOS / Apple TV / Android）按 User-Agent 认出来，记成
+    原生 App（iOS / Apple TV / Mac / Android）按 User-Agent 认出来，记成
     「MovieClaw iOS · iPhone · iOS 26.0」这样的客户端名与设备名并带上 App 版本，
     活动页与 webhook 不再把它当成「MovieClaw Web · 浏览器」。
     """
@@ -143,6 +154,11 @@ def web_client_info(*, device_id: str, user_agent: str | None) -> ClientInfo:
         device = fallback_device
         if app["platform"] == "iOS":
             device = next((name for needle, name in _PLATFORMS if needle in ua), fallback_device)
+        elif app["platform"].startswith("Android"):
+            # Android 的机型才是有用的设备名；占位的「Android」与客户端名重复
+            model = _APP_MODEL.search(ua)
+            if model is not None and model["model"].strip():
+                device = model["model"].strip()
         system = _APP_SYSTEM.search(ua)
         if system is not None:
             # 设备名与系统名相同（Android）时只写一次：「Android 16」而不是「Android · Android 16」
@@ -165,9 +181,12 @@ def web_client_info(*, device_id: str, user_agent: str | None) -> ClientInfo:
 # 播放日志（playback_log）：每场播放一行
 # ---------------------------------------------------------------------------
 
-#: 单次进度增量的上限：超过它视为 seek 跳过的区间，不计入观看时长。Jellyfin
-#: 客户端心跳最疏也在 30 秒级，网页端 10 秒，留足余量。
-_WATCH_DELTA_CAP_MS = 120_000
+#: 进度增量按墙钟封顶：两次上报之间最多只可能看了「间隔这么久」，多出来的是 seek
+#: 跳过的区间。余量吸收网络抖动（上报晚到一点不该吃掉下一段的观看时长）。
+#: 曾经是「单次增量超过两分钟视为 seek」的固定上限：两分钟以内的来回拖动全被当成
+#: 观看累加（NAS 实测一行 59 秒的播放记了 15 分钟），心跳疏的客户端正常播放超过
+#: 两分钟的一段又被整段丢弃。
+_WATCH_CLOCK_SLACK_MS = 2_000
 
 #: 同一设备同一单元的重复「开始」（seek、暂停后恢复、换源重协商都会再发
 #: Playing）在这个窗口内视为同一场，不另开一行；与实时注册表的保鲜期同值。
@@ -281,8 +300,9 @@ async def _log_progress(
         )
     if position_ms is not None:
         delta = position_ms - row.end_position_ms
-        if 0 < delta <= _WATCH_DELTA_CAP_MS:
-            row.watched_ms += delta
+        if delta > 0:
+            elapsed_ms = int((now - row.last_seen_at).total_seconds() * 1000)
+            row.watched_ms += min(delta, max(elapsed_ms, 0) + _WATCH_CLOCK_SLACK_MS)
         row.end_position_ms = position_ms
     row.last_seen_at = now
     row.updated_at = now
@@ -332,32 +352,28 @@ def report_heartbeat(
 async def restore_session_from_stream(
     session: AsyncSession, unit: Unit, *, member_id: int, client: ClientInfo
 ) -> None:
-    """取流到达但设备没有实时会话：从库里补位置与开始时间，把会话重建回来。
+    """取流到达但设备没有实时会话：仅按近期未结束的播放日志恢复会话。
 
     典型场景是服务重启：Infuse 正常播放阶段不发心跳，重启后只有源源不断的
-    Range 取流，活动页却看不到它。同设备同单元尚未收口的 ``playback_log``
-    行是本场播放的记录（开始时间、最近上报位置），优先用它；没有就退回
-    ``playback_state`` 的续播点；再没有就留空，等下一次上报补齐。
+    Range 取流，活动页却看不到它。同成员、设备、单元尚未收口且仍在会话
+    保鲜期内的 ``playback_log`` 才能证明近期上报过播放。没有这份证据就等
+    下一次播放上报：GET 也可能只是详情页预缓存，续播点不能证明正在播放。
     调用方只在 :func:`activity.has_session` 为假时进来，Range 连接很密，
     不能每条都查库。
     """
-    position_ms: int | None = None
-    started_at = None
     row = await _open_log(session, unit, member_id=member_id, device_id=client.device_id)
-    if row is not None:
-        position_ms = row.end_position_ms
-        started_at = row.started_at
-    else:
-        state = (await playback_state.get_states(session, [unit[0]], member_id=member_id)).get(unit)
-        if state is not None:
-            position_ms = state.position_ms
+    if (
+        row is None
+        or (utcnow() - row.last_seen_at).total_seconds() >= activity.SESSION_TTL_SECONDS
+    ):
+        return
     activity.restore_session(
         client.device_id,
         member_id=member_id,
         client=client,
         unit=unit,
-        position_ms=position_ms,
-        started_at=started_at,
+        position_ms=row.end_position_ms,
+        started_at=row.started_at,
     )
 
 
@@ -399,11 +415,13 @@ async def record_start(
             files=_played_files(files, file_id),
             contexts=contexts,
         )
-    # 起点记续播位置：看完的从头播（position 已被清零），没看完的接着播
+    # 起点记续播位置：有续播点就接着播（含看完后重看到一半的），没有就从头
     await _log_start(session, unit, member_id=member_id, client=client, position_ms=row.position_ms)
+    # 「开始播放」随这次提交成立（domain-events.md §8）：Webhook、插件（如网盘预探下一集）都订它
+    await playback_events.publish_playback(
+        session, PLAYBACK_STARTED, unit, row, member_id=member_id, client=client, file_id=file_id
+    )
     await session.commit()
-    event = await build_playback_event(session, "playback.started", unit, row, client=client)
-    emit_events([event] if event is not None else [])
     return row
 
 
@@ -469,23 +487,25 @@ async def record_progress(
         stopped=stopped,
         completed=newly_played,
     )
-    await session.commit()
-
     # 停止发 stopped；本次刚翻转为已看追加 completed（心跳也可能触发翻转——
-    # 播过 90% 直接关页面就是这条路径）；普通心跳按单元节流发 progress。
+    # 播过 90% 直接关页面就是这条路径）；普通心跳按单元节流发 progress。都随这次提交成立
     emit_progress = not stopped and not newly_played and not _progress_throttled(unit)
-    events = []
-    for name, hit in (
-        ("playback.stopped", stopped),
-        ("playback.completed", newly_played),
-        ("playback.progress", emit_progress),
+    for event, hit in (
+        (PLAYBACK_STOPPED, stopped),
+        (PLAYBACK_COMPLETED, newly_played),
+        (PLAYBACK_PROGRESS, emit_progress),
     ):
-        if not hit:
-            continue
-        event = await build_playback_event(
-            session, name, unit, row, duration_ms=runtime_ms, client=client
-        )
-        if event is not None:
-            events.append(event)
-    emit_events(events)
+        if hit:
+            await playback_events.publish_playback(
+                session,
+                event,
+                unit,
+                row,
+                member_id=member_id,
+                client=client,
+                duration_ms=runtime_ms,
+                file_id=file_id,
+                completed=newly_played,
+            )
+    await session.commit()
     return row

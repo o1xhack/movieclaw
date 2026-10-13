@@ -75,9 +75,11 @@ from movieclaw_api.services.library.items import (
 from movieclaw_api.services.library.profile import profile_for
 from movieclaw_api.services.media_extract import window_format
 from movieclaw_api.services.media_scrape import asset_version
+from movieclaw_api.services.people_images import avatar_url
 from movieclaw_api.services.playback import marks as playback_marks
 from movieclaw_api.services.playback.signing import issue_stream_token
 from movieclaw_api.services.playback_up_next import _progress_percent, _runtime_ms
+from movieclaw_api.services.reels import clips
 from movieclaw_api.services.reels.segments import (
     FileRef,
     ReelSegment,
@@ -98,19 +100,20 @@ from movieclaw_db.models import (
     ReelEvent,
 )
 from movieclaw_playback import state as playback_state
+from movieclaw_playback.streaming import is_strm
 
 logger = logging.getLogger("movieclaw_api.reels")
 
-#: 一期能从中间起播并读得出索引的容器（原盘、镜像、TS 一期跳过）
-SUPPORTED_CONTAINERS = ("mkv", "webm", "mp4", "m4v", "mov")
 #: 一页最多等多久（秒）：超时没算完的这一页先跳过
 PAGE_BUDGET_S = 3.0
 #: 一页最多往后看多少部（很多部挑不出片段时不至于无限往后翻）
 SCAN_FACTOR = 3
 #: 剧集太短（片花、预告）不抽。不能定太高：《小猪佩奇》一集只有 5 分钟左右
 MIN_EPISODE_SECONDS = 120
-#: App 目前会放的方式
+#: App 会放的方式：从原片中间起播 / 预切好的片段文件
+#: （开了「片段预切」才出，docs/design/reels.md §8）
 MODE_SEEK = "seek"
+MODE_CLIP = "clip"
 
 _warm_tasks: set[asyncio.Task[Any]] = set()
 
@@ -131,6 +134,8 @@ class ReelPage:
     next_offset: int
     has_more: bool
     items: list[dict[str, Any]] = field(default_factory=list)
+    #: 片段预切进度（clip 模式才有）
+    clips: dict[str, Any] | None = None
 
 
 # --- 抽样 ------------------------------------------------------------------------
@@ -162,8 +167,6 @@ def _playable_file_filter(library_ids: Sequence[int]) -> list[Any]:
         LibraryFile.library_id.in_(list(library_ids)),  # type: ignore[attr-defined]
         LibraryFile.in_place(),
         LibraryFile.media_item_id.is_not(None),  # type: ignore[union-attr]
-        LibraryFile.container.in_(SUPPORTED_CONTAINERS),  # type: ignore[union-attr]
-        ~LibraryFile.file_path.ilike("%.strm"),  # type: ignore[attr-defined]
     ]
 
 
@@ -361,6 +364,9 @@ def _file_ref(file: LibraryFile, kind: str) -> FileRef:
         duration_s=float(file.duration_seconds) if file.duration_seconds else None,
         hdr=file.hdr,
         subtitle_streams=list(file.subtitle_streams or []),
+        container=file.container,
+        disc_playlist=file.disc_playlist if isinstance(file.disc_playlist, dict) else None,
+        chapters=list(file.chapters or []),
     )
 
 
@@ -411,7 +417,8 @@ async def build_feed(
 ) -> ReelPage:
     """组一页。``modes`` 里没有本服务能出的放法时返回空页；``filters`` / ``kind`` 收窄抽样池。"""
     seed = seed if seed is not None else secrets.randbelow(2**31)
-    if MODE_SEEK not in modes:
+    clip_mode = MODE_CLIP in modes and await clips.enabled()
+    if MODE_SEEK not in modes and not clip_mode:
         return ReelPage(seed=seed, next_offset=offset, has_more=False)
     reel_pool = await pool_libraries(session, principal, kind)
     libraries = reel_pool.libraries
@@ -423,6 +430,8 @@ async def build_feed(
     content_limit = await content_limit_for(session, principal)
     pool = await _title_pool(session, libraries, content_limit, filters, member_id)
     pool = weighted_order(pool, await _ratings_of(session, [i for i, _ in pool]), seed)
+    if clip_mode:
+        return await _clip_page(session, pool, offset, limit, seed, reel_pool, member_id)
 
     window = pool[offset : offset + limit * SCAN_FACTOR]
     candidates = await _choose_candidates(session, window, list(libraries))
@@ -449,6 +458,53 @@ async def build_feed(
     items = await _assemble(session, page, member_id)
     _warm_stills([i["title"]["backdrop_url"] or i["cover_url"] for i in items[:WARM_STILLS]])
     return ReelPage(seed=seed, next_offset=next_offset, has_more=has_more, items=items)
+
+
+async def _clip_page(
+    session: AsyncSession,
+    pool: list[tuple[int, str]],
+    offset: int,
+    limit: int,
+    seed: int,
+    reel_pool: ReelPool,
+    member_id: int,
+) -> ReelPage:
+    """clip 模式的一页：顺着同一个抽样顺序往后，只挑切好的。
+
+    偏移仍按完整的抽样顺序算（不先把池子筛成「切好的」再分页）：中途又切好了几部，
+    排在已经刷过的位置之前的这次就不出，之后的照常出——同一次刷片不会重复、不会跳漏。
+    切好的片段一定有挑点缓存，不用现算，也不用预读、预热（小文件本身就快）。
+    """
+    clips.ensure_planned(video=reel_pool.video)
+    progress = clips.progress([item_id for item_id, _ in pool])
+    ready = clips.ready_item_ids()
+    window, index = [], offset
+    while index < len(pool) and len(window) < limit:
+        if pool[index][0] in ready:
+            window.append(pool[index])
+        index += 1
+    page: list[ReelCandidate] = []
+    infos: dict[int, clips.ClipInfo] = {}
+    for candidate in await _choose_candidates(session, window, list(reel_pool.libraries)):
+        segment = cached_segment(_file_ref(candidate.file, candidate.kind))
+        info = (
+            clips.ready_clip(candidate.file, segment)  # type: ignore[arg-type]
+            if isinstance(segment, ReelSegment)
+            else None
+        )
+        if info is None:
+            # 挑点重算过、换了版本：这一部要重切，这次先不出
+            clips.on_file_changed(candidate.media_item_id)
+            continue
+        candidate.segment = segment  # type: ignore[assignment]
+        infos[info.file_id] = info
+        page.append(candidate)
+    has_more = any(item_id in ready for item_id, _ in pool[index:])
+    items = await _assemble(session, page, member_id, clips_by_file=infos)
+    _warm_stills([i["title"]["backdrop_url"] or i["cover_url"] for i in items[:WARM_STILLS]])
+    return ReelPage(
+        seed=seed, next_offset=index, has_more=has_more, items=items, clips=progress
+    )
 
 
 async def _segments_within_budget(
@@ -667,7 +723,6 @@ def _warm_stills(urls: list[str | None]) -> None:
     """
 
     async def warm() -> None:
-        from movieclaw_api.services.image_cache import get_image_cache
         from movieclaw_api.services.image_variants import (
             ImageVariant,
             get_image_variant_service,
@@ -681,13 +736,7 @@ def _warm_stills(urls: list[str | None]) -> None:
                 continue
             try:
                 if url.startswith(("http://", "https://")):
-                    cached = await get_image_cache().get_or_fetch(url)
-                    await variants.get_or_create(
-                        cached.path,
-                        source_key=f"remote:{url}",
-                        source_version=cached.version,
-                        variant=ImageVariant.REEL_STILL,
-                    )
+                    await variants.get_or_create_remote(url, variant=ImageVariant.REEL_STILL)
                     continue
                 rel = url.removeprefix("/images/assets/").split("?", 1)[0]
                 target = resolve_asset_path(rel)
@@ -720,8 +769,13 @@ def _asset_url(rel: str | None) -> str | None:
 
 
 async def _assemble(
-    session: AsyncSession, candidates: list[ReelCandidate], member_id: int
+    session: AsyncSession,
+    candidates: list[ReelCandidate],
+    member_id: int,
+    *,
+    clips_by_file: dict[int, clips.ClipInfo] | None = None,
 ) -> list[dict[str, Any]]:
+    """把候选装成接口条目。``clips_by_file`` 里有的文件按 clip 放（预切片段），其余按 seek。"""
     if not candidates:
         return []
     item_ids = sorted({c.media_item_id for c in candidates})
@@ -788,7 +842,12 @@ async def _assemble(
             else await playback_marks.get_state(session, played_target, member_id=member_id)
         )
         token = await issue_stream_token(member_id=member_id, file_id=int(file.id or 0))
-        subtitle_ordinal = choose_subtitle(file.subtitle_streams)
+        clip = (clips_by_file or {}).get(int(file.id or 0))
+        disc = disc_delivery(file)
+        # 光盘的字幕清单是服务端按整盘探测的，与引擎读到的盘内轨对不上序号；strm 抽不了字幕窗口
+        subtitle_ordinal = (
+            None if disc or is_strm(file.file_path) else choose_subtitle(file.subtitle_streams)
+        )
         subtitle = None
         if subtitle_ordinal is not None:
             stream = (file.subtitle_streams or [])[subtitle_ordinal]
@@ -838,12 +897,19 @@ async def _assemble(
                     "method": segment.method,
                 },
                 "play": {
-                    "mode": MODE_SEEK,
+                    "mode": MODE_CLIP if clip else MODE_SEEK,
                     "stream_url": f"/api/v1/playback/files/{file.id}/stream?token={token}",
+                    "clip_url": f"{clip.url_path}?token={token}" if clip else None,
+                    "clip_size_bytes": clip.size_bytes if clip else None,
                     "size_bytes": file.size_bytes,
-                    "audio_ordinal": choose_audio(file.audio_streams),
+                    "disc": disc,
+                    # 镜像的音轨清单服务端读不出盘内结构、不可信：交给引擎按盘上的默认音轨起播
+                    "audio_ordinal": None if disc == "image" else choose_audio(file.audio_streams),
                     "subtitle": subtitle,
-                    "prefetch": [
+                    # 小文件不用预取原片字节
+                    "prefetch": []
+                    if clip
+                    else [
                         {"offset": r.offset, "length": r.length, "purpose": r.purpose}
                         for r in segment.prefetch
                     ],
@@ -851,6 +917,17 @@ async def _assemble(
             }
         )
     return out
+
+
+def disc_delivery(file: LibraryFile) -> str | None:
+    """光盘怎么交给 App 引擎（与正片同一套，docs/design/disc-direct-play.md §2.2）：
+    镜像给原字节地址（image），原盘目录按目录清单逐个文件取（folder），其余是普通文件（None）。"""
+    container = (file.container or "").lower()
+    if container == "iso":
+        return "image"
+    if container in ("bluray", "dvd"):
+        return "folder"
+    return None
 
 
 #: 片段字幕窗口：起点前多留几秒（接住起点前开始、还没说完的那句），终点后多留几秒
@@ -886,11 +963,9 @@ async def _directors_of(
     session: AsyncSession, item_ids: Sequence[int]
 ) -> dict[int, list[dict[str, Any]]]:
     """条目 → 导演（剧集为主创），取自与详情页同一张影人关系表，按署名顺序。"""
-    from movieclaw_api.core.config import get_settings
 
     if not item_ids:
         return {}
-    base = get_settings().tmdb_image_base_url.rstrip("/")
     rows = await session.execute(
         select(
             MediaItemPerson.media_item_id, Person.name, Person.profile_path, Person.tmdb_person_id
@@ -910,7 +985,7 @@ async def _directors_of(
                 {
                     "name": name,
                     "tmdb_person_id": tmdb_id,
-                    "avatar_url": f"{base}/w185{profile}" if profile else None,
+                    "avatar_url": avatar_url(profile),
                 }
             )
     return out

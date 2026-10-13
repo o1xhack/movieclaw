@@ -25,11 +25,11 @@ from sqlalchemy import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from movieclaw_api.services.library.chapters import chapter_image_map, effective_chapters
-from movieclaw_api.services.media_scrape import LOGO_ASSET_SIZE
+from movieclaw_api.services.media_scrape import LOGO_ASSET_SIZE, image_kind_of
 from movieclaw_db.engine import get_database
 from movieclaw_db.models import Library, LibraryFile, MediaEpisode, MediaMetadata, MediaSeason
 from movieclaw_jellyfin.errors import JellyfinError, not_found
-from movieclaw_jellyfin.ids import EntityKind, decode_guid, item_guid
+from movieclaw_jellyfin.ids import FIXED_COLLECTIONS, EntityKind, decode_guid, item_guid
 
 router = APIRouter()
 
@@ -43,36 +43,42 @@ _ITEM_IMAGE_LAYERS: dict[str, tuple[str, str, str]] = {
 }
 
 
-async def _person_image(person_id: int, image_type: str) -> Response:
+async def _person_image(person_id: int, image_type: str, request: Request) -> Response:
     """影人头像：TMDB profile 经图片代理（SSRF 防护 + 本地缓存）落盘直出。
 
     离线/图床不可达时 404——播放器按无头像降级，不阻断详情页。"""
     if image_type.lower() != "primary":
         raise JellyfinError(404, text=f"Item does not have an image of type {image_type}")
-    from movieclaw_api.core.config import get_settings
     from movieclaw_api.services.image_cache import get_image_cache
+    from movieclaw_api.services.network_egress import effective_tmdb_image_base_url
     from movieclaw_db.models import Person
 
     async with get_database().session() as session:
         person = await session.get(Person, person_id)
     if person is None or not person.profile_path:
         raise JellyfinError(404, text="Item does not have an image of type Primary")
-    base = get_settings().tmdb_image_base_url.rstrip("/")
-    try:
-        cached = await get_image_cache().get_or_fetch(f"{base}/w300{person.profile_path}")
-    except Exception:
-        raise not_found() from None
     import hashlib
 
+    from movieclaw_api.services.people_images import avatar_file
+    from movieclaw_api.services.scrape_config import effective_profile_size
+
     tag = hashlib.md5(person.profile_path.encode()).hexdigest()
-    return FileResponse(
-        cached.path,
-        media_type=cached.content_type,
-        headers={
-            "Cache-Control": "public, max-age=31536000, immutable",
-            "ETag": f'"{tag}"',
-        },
+    headers = {"Cache-Control": "public, max-age=31536000, immutable", "ETag": f'"{tag}"'}
+    # 刮削时已落本地的头像优先（断网可用，见 docs/design/image-sizing.md §4.2），按 maxWidth 缩放
+    tier = effective_profile_size()
+    local = avatar_file(person.profile_path, tier)
+    if local.is_file():
+        target, media_type = await _maybe_scaled(local, request)
+        return FileResponse(target, media_type=media_type, headers=headers)
+    base = effective_tmdb_image_base_url().rstrip("/")
+    try:
+        cached = await get_image_cache().get_or_fetch(f"{base}/{tier}{person.profile_path}")
+    except Exception:
+        raise not_found() from None
+    target, media_type = await _maybe_scaled(
+        cached.path, request, original_type=cached.content_type, source_version=cached.version
     )
+    return FileResponse(target, media_type=media_type, headers=headers)
 
 
 async def _chapter_asset(
@@ -226,26 +232,27 @@ async def _item_layer_fallbacks(
             path = Path(p)
             if path not in roots:
                 roots.append(path)
-    art = await asyncio.to_thread(local_item_artwork, roots, files, kind)
+    art = await asyncio.to_thread(local_item_artwork, roots, files, kind, media_kind=item.kind)
     return art, tmdb_path
 
 
 async def _tmdb_image(tmdb_path: str, itype: str, request: Request) -> Response:
     """TMDB 图床兜底：经图片代理拉取缓存后直出（档位对齐 Web 的兜底展示）。"""
-    from movieclaw_api.core.config import get_settings
     from movieclaw_api.services.image_cache import get_image_cache
+    from movieclaw_api.services.network_egress import effective_tmdb_image_base_url
+    from movieclaw_api.services.tmdb_images import remote_image_url
 
-    base = get_settings().tmdb_image_base_url.rstrip("/")
+    base = effective_tmdb_image_base_url().rstrip("/")
     size = _ITEM_IMAGE_LAYERS[itype][2]
     try:
-        cached = await get_image_cache().get_or_fetch(f"{base}/{size}{tmdb_path}")
+        cached = await get_image_cache().get_or_fetch(remote_image_url(base, size, tmdb_path))
     except Exception:
         raise JellyfinError(
             404, text=f"Item does not have an image of type {itype.capitalize()}"
         ) from None
     # 缓存文件无扩展名，原图类型以缓存元数据为准
     target, media_type = await _maybe_scaled(
-        cached.path, request, original_type=cached.content_type
+        cached.path, request, original_type=cached.content_type, source_version=cached.version
     )
     tag = hashlib.md5(f"tmdb:{tmdb_path}".encode()).hexdigest()
     return FileResponse(
@@ -285,8 +292,25 @@ async def get_item_image(
                 "ETag": f'"{cover[1]}"',
             },
         )
+    if ref is not None and ref.kind == EntityKind.FIXED and ref.entity_id == FIXED_COLLECTIONS:
+        # 「合集」视图封面：/UserViews 按观看者权限渲染好，tag 即素材指纹
+        from movieclaw_api.services.library.cover import collections_view_cover
+
+        tag = request.query_params.get("tag") or ""
+        path = collections_view_cover(tag) if image_type.lower() == "primary" else None
+        if path is None:
+            raise JellyfinError(404, text=f"Item does not have an image of type {image_type}")
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={
+                "Vary": "Accept",
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "ETag": f'"{tag}"',
+            },
+        )
     if ref is not None and ref.kind == EntityKind.PERSON:
-        return await _person_image(ref.entity_id, image_type)
+        return await _person_image(ref.entity_id, image_type, request)
     # 条目 Primary/Backdrop/Logo 走与 Web 相同的三层解析（docs/design/metadata.md 5）：
     # 条目目录美术图（用户/第三方刮削器放的图，最优先；规则见 services/library/
     # artwork.py：文件自己的 <主干>-poster 精确匹配，目录级 poster.jpg 只在目录归
@@ -359,6 +383,10 @@ async def get_item_image(
 
 
 _SCALE_PARAMS = ("maxWidth", "maxHeight", "width", "height", "fillWidth", "fillHeight")
+# 缩放框缺省边（不限制）
+_MAX_EDGE = 8192
+# 原图直出前要先转成 JPEG/PNG 的格式
+_TRANSCODE_KINDS = ("webp", "avif")
 
 
 def _scale_bounds(request: Request) -> tuple[int, int] | None:
@@ -378,7 +406,7 @@ def _scale_bounds(request: Request) -> tuple[int, int] | None:
         return None
     widths = [v for n, v in values if "idth" in n]
     heights = [v for n, v in values if "eight" in n]
-    return (min(widths) if widths else 8192, min(heights) if heights else 8192)
+    return (min(widths) if widths else _MAX_EDGE, min(heights) if heights else _MAX_EDGE)
 
 
 def _render_scaled(src: Path, bounds: tuple[int, int]) -> tuple[bytes, str]:
@@ -406,22 +434,45 @@ def _render_scaled(src: Path, bounds: tuple[int, int]) -> tuple[bytes, str]:
 
 
 async def _maybe_scaled(
-    target: Path, request: Request, *, original_type: str | None = None
+    target: Path,
+    request: Request,
+    *,
+    original_type: str | None = None,
+    source_version: str | None = None,
 ) -> tuple[Path, str]:
     """按需生成缩放变体（经 ImageCache 复用），返回 (文件, Content-Type)；
-    无缩放参数或缩放失败时原图直出。``original_type`` 供无扩展名的缓存文件指定类型。"""
-    original_type = original_type or mimetypes.guess_type(str(target))[0] or "image/jpeg"
+    无缩放参数或缩放失败时原图直出。``original_type`` 供无扩展名的缓存文件指定类型。
+
+    ``source_version``：源文件本身就在图片缓存里（TMDB 兜底图）时传缓存条目的版本。
+    缓存命中会每小时 touch 一次文件 mtime（LRU 记访问时间），拿 mtime 当版本的话
+    每小时就多渲染一份同样的缩放图、旧的堆着等淘汰。
+
+    类型按文件头认，不信扩展名（issue #587）：旧版本从图床落下的 poster.jpg 有
+    一部分其实是 WebP，按扩展名报 image/jpeg 会让播放器解码失败。WebP/AVIF
+    即使不缩放也转一份 JPEG/PNG 给出去——第三方播放器对它们的支持参差。"""
+    # 读文件头走线程池：目录美术图在片库目录里，片库可能是 NFS 挂载，同步读一卡
+    # 就是整个事件循环一起卡
+    kind = await asyncio.to_thread(image_kind_of, target)
+    original_type = (
+        (f"image/{kind}" if kind else None)
+        or original_type
+        or mimetypes.guess_type(str(target))[0]
+        or "image/jpeg"
+    )
     bounds = _scale_bounds(request)
     if bounds is None:
-        return target, original_type
-    try:
-        stat = target.stat()
-    except OSError:
-        return target, original_type
+        if kind not in _TRANSCODE_KINDS:
+            return target, original_type
+        bounds = (_MAX_EDGE, _MAX_EDGE)  # 只转格式，不缩
+    if source_version is None:
+        try:
+            source_version = str(target.stat().st_mtime_ns)
+        except OSError:
+            return target, original_type
     from movieclaw_api.services.image_cache import get_image_cache
 
-    # 键里带源文件路径与 mtime：原图被重新刮削后旧变体自然失效，由 LRU 回收
-    key = f"jellyfin-scaled:{target}:{stat.st_mtime_ns}:{bounds[0]}x{bounds[1]}"
+    # 键里带源文件路径与版本：原图被重新刮削后旧变体自然失效，由 LRU 回收
+    key = f"jellyfin-scaled:{target}:{source_version}:{bounds[0]}x{bounds[1]}"
 
     async def produce() -> tuple[bytes, str]:
         return await asyncio.to_thread(_render_scaled, target, bounds)

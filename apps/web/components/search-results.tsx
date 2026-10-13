@@ -39,6 +39,7 @@ import {
   type DownloadTargetPref,
 } from "@/lib/api/downloaders";
 import { platformLabel } from "@/lib/platforms";
+import { noMorePages } from "@/lib/search-pages";
 import {
   getTorrentSearchHistoryResults,
   streamSearchTorrents,
@@ -56,7 +57,7 @@ import {
   downloadSelectedTorrentForSubscription,
   getSubscription,
 } from "@/lib/api/subscriptions";
-import { cachedImageUrl } from "@/lib/image-proxy";
+import { cachedImageUrl, coverWidth, fullScreenImageWidth, screenImageWidth } from "@/lib/image-proxy";
 import { layoutPosterGrid } from "@/lib/wall-window";
 import { usePermissions } from "@/lib/permissions";
 import { formatDateTime, formatRelativeTime } from "@/lib/time";
@@ -92,6 +93,8 @@ import { useScrollRestoration } from "@/lib/use-scroll-restoration";
  */
 export interface SearchQuery {
   keyword: string;
+  /** 同搜词：与 keyword 一起搜、结果按站点合并（详情页「搜索资源」带上英文名/原名） */
+  also?: string[];
   /** 搜索范围（标签换算而来）：展示名 + 分类/站点组合 */
   scope: SearchScope;
   /**
@@ -104,7 +107,7 @@ export interface SearchQuery {
 export interface SearchResultsProps {
   query: SearchQuery;
   /** 发起实时搜索（快照提示条的「重新搜索」按钮）；不传则不渲染该按钮。 */
-  onResearch?: (keyword: string, scope: SearchScope) => void;
+  onResearch?: (keyword: string, scope: SearchScope, also?: string[]) => void;
   /** 手动选种模式（URL 的 for_sub 参数）：每条资源多一颗「投给订阅」按钮，
    *  点击直接投给该订阅（跳过规则组过滤，身份匹配照常）。 */
   grabForSubscriptionId?: number | null;
@@ -771,7 +774,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
   const isNf = useTheme().structural;
   const silverMobile = useIsMobile() && !isNf;
   const scrollRef = useScrollRestoration(
-    `search:torrent:${query.keyword}:${query.scope.label ?? "all"}:${query.scope.categories.join(",")}:${query.scope.siteIds.join(",")}:${query.snapshotId ?? "live"}`,
+    `search:torrent:${query.keyword}:${(query.also ?? []).join("|")}:${query.scope.label ?? "all"}:${query.scope.categories.join(",")}:${query.scope.siteIds.join(",")}:${query.snapshotId ?? "live"}`,
   );
   const [phase, setPhase] = useState<Phase>("connecting");
   // 手动选种模式：拉一次订阅标题供横幅与按钮提示；订阅不存在则静默退出该模式
@@ -799,6 +802,8 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
   const [siteProgress, setSiteProgress] = useState<SiteProgress[]>([]);
   // 整次搜索的总耗时（done 事件 / 快照回放），站点状态弹层的汇总行展示
   const [totalElapsedMs, setTotalElapsedMs] = useState<number | null>(null);
+  // 实际同搜的词：以后端回显为准（URL 里的词经它去重后可能变少），标题旁写「另含」
+  const [alsoSearched, setAlsoSearched] = useState<string[]>([]);
   // 快照预览态：非空 = 当前展示的是历史快照（值为快照生成时间，供提示条换算年龄）
   const [snapshotAt, setSnapshotAt] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>(emptyFilters);
@@ -851,6 +856,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
     setItems([]);
     setSiteProgress([]);
     setTotalElapsedMs(null);
+    setAlsoSearched([]);
     setSnapshotAt(null);
     setFilters(emptyFilters());
     setPage(1);
@@ -882,6 +888,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
             })),
           );
           setTotalElapsedMs(snap.elapsed_ms ?? null);
+          setAlsoSearched(snap.also_keywords ?? []);
           setSnapshotAt(snap.snapshot_at);
           setPhase("done");
         })
@@ -902,11 +909,12 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
       );
 
     streamSearchTorrents(
-      { keyword: query.keyword, scope: query.scope },
+      { keyword: query.keyword, also: query.also, scope: query.scope },
       (event) => {
         switch (event.type) {
           case "start":
             setPhase("streaming");
+            setAlsoSearched(event.data.also_keywords ?? []);
             setSiteProgress(
               event.data.sites.map((s) => ({
                 ...s,
@@ -932,6 +940,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
           }
           case "done":
             setTotalElapsedMs(event.data.elapsed_ms);
+            if (noMorePages(event.data.sites)) setExhausted(true);
             setPhase("done");
             break;
         }
@@ -962,7 +971,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
     const controller = new AbortController();
     auxAbortsRef.current.add(controller);
     streamSearchTorrents(
-      { keyword: query.keyword, scope: { ...query.scope, siteIds: [siteId] } },
+      { keyword: query.keyword, also: query.also, scope: { ...query.scope, siteIds: [siteId] } },
       (event) => {
         if (event.type === "site_result") {
           const d = event.data;
@@ -1011,9 +1020,11 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
     const controller = new AbortController();
     auxAbortsRef.current.add(controller);
     let added = 0;
+    let lastPage = false;
     streamSearchTorrents(
-      { keyword: query.keyword, scope: query.scope, page: next },
+      { keyword: query.keyword, also: query.also, scope: query.scope, page: next },
       (event) => {
+        if (event.type === "done") lastPage = noMorePages(event.data.sites);
         if (event.type !== "site_result") return;
         const d = event.data;
         setItems((prev) => {
@@ -1029,7 +1040,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
       .then(() => {
         if (controller.signal.aborted) return;
         setPage(next);
-        if (added === 0) setExhausted(true);
+        if (added === 0 || lastPage) setExhausted(true);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -1134,6 +1145,15 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
               {query.keyword ? `“${query.keyword}”` : "最新资源"}
             </h1>
           )}
+          {/* 详情页带来的同搜词（英文名/原名）：结果是几个词合并的，写明免得困惑 */}
+          {alsoSearched.length > 0 && (
+            <span
+              title="与这些名字一起搜索，结果已按站点合并"
+              className="text-on-image min-w-0 truncate text-sub text-[rgba(243,245,249,0.6)]"
+            >
+              另含 {alsoSearched.join(" · ")}
+            </span>
+          )}
           {!silverMobile && query.scope.label && (
             <span className="rounded-full bg-black/30 px-2.5 py-0.5 text-caption text-[var(--accent)] backdrop-blur-sm">
               {query.scope.label}
@@ -1178,7 +1198,7 @@ export function SearchResults({ query, onResearch, grabForSubscriptionId }: Sear
                 {onResearch && (
                   <button
                     type="button"
-                    onClick={() => onResearch(query.keyword, query.scope)}
+                    onClick={() => onResearch(query.keyword, query.scope, query.also)}
                     className="btn-accent rounded-full px-2.5 py-1 text-caption font-medium"
                   >
                     重新搜索
@@ -2686,7 +2706,7 @@ function SiteStatusSummary({
         <>
           {/* 点击空白处关闭（与筛选弹层同款交互） */}
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="solid-popover absolute right-0 top-full z-30 mt-2 w-[320px] max-w-[82vw] rounded-2xl border border-white/[0.12] bg-[rgba(14,16,22,0.94)] p-2 shadow-2xl backdrop-blur-2xl">
+          <div className="solid-popover absolute right-0 top-full z-30 mt-2 max-h-[60dvh] w-[320px] max-w-[82vw] overflow-y-auto rounded-2xl border border-white/[0.12] bg-[rgba(14,16,22,0.94)] p-2 shadow-2xl backdrop-blur-2xl">
             {details}
           </div>
         </>
@@ -2990,6 +3010,8 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
 }) {
   // 灯箱当前看的是第几张；null = 没打开（灯箱受控翻页，与媒体库那套一致）
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  // 取图用的卡宽（CSS px）；量高度的探针没有宽度，按格子常见上沿 185 估
+  const cardWidth = width ?? 185;
   const open = viewerIndex !== null;
   useEffect(() => {
     if (index === undefined || !onViewerChange) return;
@@ -3000,8 +3022,8 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
   const name = parsedName(hit);
   const seChip = seasonEpisodeChip(hit.attrs);
   // 灯箱图集：海报 + 全部图片（poster_url 通常是 image_urls 第一张，去重兜底）。
-  // 三级地址与媒体库灯箱同一口径：缩略条取 photo-tile，舞台取 photo-screen
-  // （长边 2048 的 WebP，比图床原图少几倍字节、翻页跟手），只有放大到 1:1
+  // 三级地址与媒体库灯箱同一口径：缩略条取小图（格子 48 高，宽不过 96），舞台按
+  // 屏宽像素取（WebP，比图床原图少几倍字节、翻页跟手），只有放大到 1:1
   // 时才拉图床原图。PT 图床本来就慢，这一层派生由后端缓存后人人受益。
   const slides = useMemo<ZoomLightboxSlide[]>(
     () =>
@@ -3010,8 +3032,8 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
       ).map((url, i) => ({
         key: `${i}:${url}`,
         title: hit.title,
-        thumbUrl: cachedImageUrl(url, "photo-tile"),
-        screenUrl: cachedImageUrl(url, "photo-screen"),
+        thumbUrl: cachedImageUrl(url, { width: screenImageWidth(96) }),
+        screenUrl: cachedImageUrl(url, { width: fullScreenImageWidth() }),
         fullUrl: cachedImageUrl(url),
       })),
     [hit.poster_url, hit.image_urls, hit.title],
@@ -3045,18 +3067,17 @@ const TorrentPosterCard = memo(function TorrentPosterCard({
           // 一屏就是几百 MB 解码位图；派生还顺带解决动图——后端只取首帧
           // （见 image_variants._render_webp），一墙缩略图不必各自播各自的动画。
           //
-          // 用 720 外接框那一档（gallery-tile）而不是媒体库墙用的 poster-card（328）。
-          // 两个原因，都在这张卡上成立而在媒体库的墙上不成立：
+          // 宽度按「铺满 2:3 卡」算，但图片比例未知，按 4:3 折中估（卡宽的 2 倍）：
           //   1. 这个网格是 minmax(150px,1fr)，窄屏列数少、卡反而更宽（414 视口
-          //      175 CSS px、834 视口 185），dpr3 手机需要 525 设备像素，328 只
-          //      覆盖 62%——肉眼就是糊；
+          //      175 CSS px、834 视口 185），卡宽本身就要按实际宽取；
           //   2. **PT 的 poster_url 是种子图集的第一张**（见 tracker/models.py），
-          //      很可能是宽幅截图而不是 2:3 海报。派生是等比装进外接框、不裁切，
-          //      16:9 的源装进 328×492 只剩 328×185，再被这张卡的 aspect-[2/3]
-          //      + object-cover 撑开，要放大 2.8~4.3 倍。换 720 框后同一张源是
-          //      720×405，放大降到 1.3~1.9 倍。
-          // 预设名里的「gallery」说的是它的来历，这里取的是它的尺寸档位。
-          src={hit.poster_url ? cachedImageUrl(hit.poster_url, "gallery-tile") : undefined}
+          //      很可能是宽幅截图而不是 2:3 海报。16:9 的源被这张卡的 aspect-[2/3]
+          //      + object-cover 按高撑开，有效宽是卡宽的 2.7 倍；按 2:3 取就要放大
+          //      2.7 倍（糊），按 16:9 取则真海报白拿 2.7 倍像素。折中按 2 倍：
+          //      截图只放大约 1.3 倍，海报富余一档。
+          src={hit.poster_url ? cachedImageUrl(hit.poster_url) : undefined}
+          width={coverWidth(cardWidth, cardWidth * 1.5, 4 / 3)}
+          zoom={1.04}
           // 挂上来的卡必然在窗口内（虚拟化就是按这个切的），直接取图，不必再让
           // PosterImage 自己等那个 400px 的观察器——那点提前量比窗口窄，滑快了
           // 会露出一小截占位。探针没有海报地址，这里对它无影响

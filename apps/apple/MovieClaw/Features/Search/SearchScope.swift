@@ -77,6 +77,19 @@ nonisolated struct SearchScope: Hashable, Sendable {
 
     static let all = SearchScope()
 
+    /// 详情页「搜索资源」的范围（同 Web scopeOfMediaKind）：剧集只搜剧集分类、电影只搜电影分类，
+    /// 等同点了内置分类标签；其余形态（库里的「其他」/图片）不收窄
+    static func ofMediaKind(_ kind: String?) -> SearchScope {
+        guard let kind, kind == "movie" || kind == "tv" else { return .all }
+        return SearchScope(label: TorrentCategories.label(kind), categories: [kind])
+    }
+
+    /// 详情页「搜索资源」的同搜词（同 Web titleSearchAlso）：英文名 + 原名，主词是中文名，
+    /// 与订阅的召回词同一套。空值丢掉，重复的由后端去重
+    static func titleSearchAlso(_ englishTitle: String?, _ originalTitle: String?) -> [String] {
+        [englishTitle, originalTitle].compactMap { $0 }.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
     /// 编码进路由 `SearchQuery.scope`（查询串格式，与 Web URL 参数同名：label / cats / sites / poster / private）。
     /// 「全部」编码为 nil。
     var encoded: String? {
@@ -220,10 +233,10 @@ enum SearchTab: Hashable {
         return false
     }
 
-    /// 默认标签（与后端 default_search_tabs 一致）：常用四类可见
+    /// 默认标签（与后端 default_search_tabs 一致）：常用四类可见；成人不是内置分类
     static let defaults: [SearchTab] = [
         ("movie", true), ("tv", true), ("documentary", true), ("anime", true),
-        ("music", false), ("game", false), ("av", false), ("other", false),
+        ("music", false), ("game", false), ("other", false),
     ].map { .category(id: $0.0, visible: $0.1) }
 }
 

@@ -100,6 +100,20 @@ async def close_fulfilled_wanted(session: AsyncSession, media_item_id: int) -> i
         subscription = await session.get(Subscription, subscription_id)
         if subscription is None or item is None:
             continue
+        from movieclaw_api.services.subscription.events import publish_fulfilled
+
+        # 「订阅内容已入库」随下面这条入库动态一起提交（domain-events.md §8）。用户已经从订阅里
+        # 去掉的季集（in_scope 为假）顺带关掉了工单，但不是他在等的：只进 units，不进
+        # requested_units（通知只报后者）
+        await publish_fulfilled(
+            session,
+            subscription_id=subscription_id,
+            item=item,
+            units=[(w.season_number, w.episode_number) for w in wanted_rows],
+            requested_units=[
+                (w.season_number, w.episode_number) for w in wanted_rows if w.in_scope
+            ],
+        )
         await repo.add_activity(
             SubscriptionActivity(
                 subscription_id=subscription_id,
@@ -110,26 +124,6 @@ async def close_fulfilled_wanted(session: AsyncSession, media_item_id: int) -> i
             )
         )
         await recompute_subscription_status(session, subscription, item)
-        # IM 通道推送(微信/TG/Discord;fire-and-forget,失败不影响对账链路)
-        from movieclaw_api.services.channel_push import notify_channels, tmdb_push_image_url
-
-        year_text = f"({item.year}) " if item.year else ""
-        notify_channels(
-            f"🎬 已入库:《{item.title}》{year_text}{units_text(wanted_rows)}",
-            event="imported",
-            image_url=tmdb_push_image_url(item.backdrop_path, item.poster_path),
-        )
-        # 事件 Webhook(与 IM 推送同点位:入库已由库存对账确认,事件即事实)
-        from movieclaw_api.services.subscription.events import build_fulfilled_event
-        from movieclaw_api.services.webhook import emit_events
-
-        emit_events(
-            [
-                build_fulfilled_event(
-                    item, [(w.season_number, w.episode_number) for w in wanted_rows]
-                )
-            ]
-        )
         # 内容已进库，该订阅在途种子的落点告警（若有）自动熄灭
         from movieclaw_api.services.system_notice import resolve_notices
 
@@ -143,11 +137,6 @@ async def close_fulfilled_wanted(session: AsyncSession, media_item_id: int) -> i
 
     await audit_ingest_specs(session, media_item_id, fulfilled)
     logger.info("库存对账：条目 #%s 关闭了 %d 个工单", media_item_id, len(fulfilled))
-
-    # L4：通知媒体服务器刷新（未配置为 no-op；失败只告警）
-    from movieclaw_api.services.media_server_notify import notify_media_server_refresh
-
-    await notify_media_server_refresh()
     return len(fulfilled)
 
 

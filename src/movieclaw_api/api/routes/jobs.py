@@ -40,6 +40,8 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 def _origin(principal: Principal, client_name: str | None) -> str:
     if principal.kind == "agent":
         return "agent"
+    if principal.plugin is not None:
+        return "plugin"
     if client_name and client_name.strip().lower() in {"cli", "web", "agent", "scheduler"}:
         return client_name.strip().lower()
     # 命令行与手工令牌（脚本）记成 cli；网页、App 记成 web
@@ -64,6 +66,7 @@ def _job_view(job: Job, resources: list[JobResource], *, slim_input: bool = Fals
     return JobView(
         id=job.id,
         job_type=job.job_type,
+        job_type_label=jobs.job_type_label(job.job_type),
         subject=job.subject,
         definition_version=job.definition_version,
         handler_revision=job.handler_revision,
@@ -213,7 +216,9 @@ async def stream_jobs(
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # no-transform 阻止中间层 gzip：压缩器会攒块，经 Next 代理时事件一条都到不了
+        # 浏览器，任务进度只能等 60 秒一次的兜底轮询（同 agent / search 的 SSE）
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
     )
 
 

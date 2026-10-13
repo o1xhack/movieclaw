@@ -558,6 +558,8 @@ export interface SubtitlePlan {
   is_default: boolean;
   /** 本机 AI 生成的字幕（翻译 / 双语），字幕菜单据此打标 */
   is_ai?: boolean;
+  title?: string | null;
+  is_forced?: boolean | null;
 }
 
 /**
@@ -660,10 +662,11 @@ export interface PlaybackChapterMark {
 /**
  * 可跳过的一段（docs/design/skip-intro.md）：服务端整季比对认出来的，客户端只管用。
  * intro 片头（显示「跳过片头」）、outro 片尾（提前显示「即将播放」；to_end 为假时后面
- * 还有内容，按钮是「跳过片尾」）、other 片头前的冠名广告 / 发行许可（显示「跳过」）。
+ * 还有内容，按钮是「跳过片尾」）、ad 广告、preview 预告（均手动跳过）、
+ * other 未明确分类的重复段（显示「跳过此段」）。类型由服务端确认，客户端不猜测。
  */
 export interface PlaybackSegment {
-  type: "intro" | "outro" | "other";
+  type: "intro" | "outro" | "ad" | "preview" | "other";
   start_ms: number;
   end_ms: number;
   to_end: boolean;
@@ -675,6 +678,8 @@ export interface PlaybackSession {
   session_id: string | null;
   /** 可直接喂给 <video src> 或 hls.js 的地址，已带签名 token */
   stream_url: string | null;
+  /** 转码器能在整段完成前输出完整 MP4 片段；旧服务端未声明时按整段加载 */
+  progressive_segments?: boolean;
   /** 会话时间轴的零点在文件里的位置。**文件时间 = start_ms + currentTime**。
    * timeline="file"（VOD 预生成列表）时它只是建议起播位置：分片时间戳
    * 本身是文件绝对时间，currentTime 即文件时间，换算参照点为 0 */
@@ -786,9 +791,12 @@ export async function fetchPlaybackDiagnostics(
  * 会话续命，兼探活。用户关页面不会发任何信号，服务端的超时回收是唯一可靠
  * 兜底，所以播放中必须定时喂这个。
  *
- * 返回值分三态，**调用方必须区分**：
+ * 返回值分四态，**调用方必须区分**：
  *
  * - `true`  —— 会话还在；
+ * - `"failed"` —— 会话还在，但服务端已判它的本机转码起不来（起步即退出、一段都没
+ *   产出，issue #763）。这一档在这台服务器上放不了，该直接降档——干等分片 404 要被
+ *   层层重试拖十几分钟；
  * - `false` —— 服务端明确说它没了（404，多半是页面被浏览器冻在后台、心跳
  *   被节流到喂不上，会话让巡检回收了）。此时继续放下去只会卡在「正在缓冲」，
  *   要原地重开一个会话；
@@ -798,13 +806,13 @@ export async function fetchPlaybackDiagnostics(
 export async function pingPlaybackSession(
   sessionId: string,
   scope: PlaybackApiScope = DEFAULT_PLAYBACK_SCOPE,
-): Promise<boolean | null> {
+): Promise<boolean | "failed" | null> {
   try {
-    await request<ApiEnvelope<unknown>>(
+    const res = await request<ApiEnvelope<{ failed?: boolean }>>(
       `${scope.base}/sessions/${encodeURIComponent(sessionId)}/ping`,
       { method: "POST" },
     );
-    return true;
+    return res.data?.failed ? "failed" : true;
   } catch (error) {
     return error instanceof HttpError && error.status === 404 ? false : null;
   }
@@ -1062,9 +1070,26 @@ export interface PlaybackPolicy {
   trickplay_enabled: boolean;
   /** 转码产物保留供续播、重看复用（§B）；关闭即会话结束即删 */
   transcode_cache_enabled: boolean;
+  /** 片段预切（docs/design/reels.md §8）：预告与刷片放预先切好的 1080p 小文件 */
+  reel_clips_enabled: boolean;
+  /** 片段预切进度（开关开着才有） */
+  reel_clips_progress: ReelClipProgress | null;
   /** 实测结果而非配置项——用户改不了自己有没有显卡 */
   hardware_available: boolean;
   hw_backends: string[];
+}
+
+/** 片段预切进度：电影与剧集一共几部、切好了几部；state 为 paused 时是在给播放让路 */
+export interface ReelClipProgress {
+  ready: number;
+  total: number;
+  state: "running" | "paused" | "done";
+}
+
+/** 已切片段的总量（关开关前问要不要删） */
+export interface ReelClipStats {
+  count: number;
+  bytes: number;
 }
 
 /** 读取播放策略当前取值（设置页「播放」分区展示用）。 */
@@ -1075,11 +1100,27 @@ export async function fetchPlaybackPolicy(): Promise<PlaybackPolicy> {
 
 /** 按字段增量保存：没给的项保持原值，不会覆盖别处刚改的设置。 */
 export async function savePlaybackPolicy(
-  changes: Partial<Omit<PlaybackPolicy, "hardware_available" | "hw_backends">>,
+  changes: Partial<
+    Omit<PlaybackPolicy, "hardware_available" | "hw_backends" | "reel_clips_progress">
+  >,
 ): Promise<PlaybackPolicy> {
   const response = await request<ApiEnvelope<PlaybackPolicy>>("/playback/policy", {
     method: "PUT",
     body: JSON.stringify(changes),
+  });
+  return response.data;
+}
+
+/** 已切片段的数量与占用空间。 */
+export async function fetchReelClipStats(): Promise<ReelClipStats> {
+  const response = await request<ApiEnvelope<ReelClipStats>>("/reels/clips/stats");
+  return response.data;
+}
+
+/** 删除全部已切片段；返回删掉前的统计。 */
+export async function deleteReelClips(): Promise<ReelClipStats> {
+  const response = await request<ApiEnvelope<ReelClipStats>>("/reels/clips", {
+    method: "DELETE",
   });
   return response.data;
 }

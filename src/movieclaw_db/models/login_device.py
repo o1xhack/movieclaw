@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field
 
 from movieclaw_db.models.base import TimestampMixin
@@ -30,7 +31,7 @@ class LoginDevice(MemberScopedMixin, TimestampMixin, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
 
-    # 客户端类型：web（浏览器）/ ios / tvos / android（原生 App）/
+    # 客户端类型：web（浏览器）/ ios / tvos / macos / android（原生 App）/
     # cli（命令行）/ worker（转码器）/ manual（网页手工创建的令牌）。
     # 决定两件事：能不能签发新凭证（人直接操作的客户端才能），以及改密时
     # 属于哪一类（密码换来的随改密下线；配对换来的默认保留）。
@@ -49,3 +50,35 @@ class LoginDevice(MemberScopedMixin, TimestampMixin, table=True):
     # 只有网页会话有过期时间（沿用 7 天 / 记住我 30 天）；App、命令行、转码器
     # 长期有效，失效只靠注销——自动过期等于让用户某天莫名其妙掉线。
     expires_at: datetime | None = Field(default=None, description="过期时间；空=长期有效")
+
+    # -- App 推送登记（docs/design/cloud-push.md §4）------------------------------
+    # 只有 App 类设备（ios / tvos / android）会登记：App 用这台设备自己的凭证把 APNs
+    # 令牌和解密密钥交给实例。跟着这一行走——退出登录、注销设备、删除成员时随行删除，
+    # 不会留下一个还能往别人手机上推的登记。密钥是这台设备解密推送内容用的，加密存储。
+    push_token: str | None = Field(default=None, description="APNs 设备令牌（十六进制）")
+    push_topic: str | None = Field(default=None, description="App 的 Bundle ID")
+    push_environment: str | None = Field(
+        default=None, description="production / development（调试版是 development）"
+    )
+    push_types: list | None = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+        description="这台设备支持的推送类型，如 [\"alert\"]",
+    )
+    push_key_id: str | None = Field(default=None, description="解密密钥的 key_id（随机值）")
+    push_key: str | None = Field(default=None, description="解密密钥（SecretBox 加密存储）")
+    push_permission: str | None = Field(
+        default=None, description="系统通知权限：authorized / provisional / denied ……"
+    )
+    push_problem: str | None = Field(
+        default=None,
+        description="推送暴露的问题：bad_token（令牌和环境对不上等）、unsupported_build（安装包没有推送权限）",
+    )
+    push_registered_at: datetime | None = Field(default=None, description="最近一次登记时间")
+    # 自托管实时通知（cloud-push.md §4.1）：Android App 开了「实时通知（保持连接）」，
+    # 推送不走中继，写进这台设备的发件箱（push_outbox），由它连着的 /push/me/stream 送出
+    push_stream: bool = Field(
+        default=False,
+        sa_column_kwargs={"server_default": "0"},
+        description="走自托管实时连接收通知",
+    )

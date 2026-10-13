@@ -135,6 +135,37 @@ async def test_a_finished_movie_disappears_and_an_unfinished_one_stays(db) -> No
         assert rows[0].advanced is False
 
 
+async def test_rewatching_a_finished_title_halfway_keeps_the_card(db) -> None:
+    """看完后重看到一半：已看标记保留，但带着续播点——卡片要留着、停在这一单元接着看。"""
+    async with db.session() as session:
+        library = await LibraryRepository(session).create(
+            name="电影库", kind="movie", root_paths=["/m"]
+        )
+        movie = MediaItem(kind="movie", tmdb_id=1, title="重看电影", original_title="Again")
+        show = MediaItem(kind="tv", tmdb_id=2, title="重看剧集", original_title="Again TV")
+        session.add_all([movie, show])
+        await session.flush()
+        assert library.id and movie.id and show.id
+        session.add_all(
+            [
+                _file(library.id, movie.id, 0, 0),
+                _file(library.id, show.id, 1, 1),
+                _file(library.id, show.id, 1, 2),
+                _state(movie.id, 0, 0, played=True, position_ms=600_000, at=datetime(2026, 8, 16)),
+                _state(show.id, 1, 1, played=True, position_ms=600_000, at=datetime(2026, 8, 15)),
+                _state(show.id, 1, 2, played=True, at=datetime(2026, 8, 14)),
+            ]
+        )
+        await session.commit()
+
+        rows = await _cards(session, {library.id})
+        assert [row.media_item_id for row in rows] == [movie.id, show.id]
+        # 停在重看的这一集，不跳下一集
+        assert (rows[1].season_number, rows[1].episode_number) == (1, 1)
+        assert rows[0].progress_percent == 25
+        assert all(row.advanced is False for row in rows)
+
+
 async def test_finishing_an_episode_moves_the_card_to_the_next_one(db) -> None:
     """看完一集，卡片换成下一集——这正是旧版要点三步才能做到的事。"""
     async with db.session() as session:
@@ -155,8 +186,10 @@ async def test_finishing_an_episode_moves_the_card_to_the_next_one(db) -> None:
                     season_number=1,
                     episode_number=2,
                     name="第二集",
+                    overview="第二集的简介",
                     still_path="/e2.jpg",
                 ),
+                MediaMetadata(media_item_id=show.id, overview="整部剧的简介"),
                 _state(show.id, 1, 1, played=True),
             ]
         )
@@ -166,9 +199,11 @@ async def test_finishing_an_episode_moves_the_card_to_the_next_one(db) -> None:
         assert len(rows) == 1
         card = rows[0]
         assert (card.season_number, card.episode_number) == (1, 2)
-        # 标题、剧照、时长都要跟着换成**卡片这一集**的，不能还留在上一集上
+        # 标题、剧照、简介、时长都要跟着换成**卡片这一集**的，不能还留在上一集上
         assert card.episode_title == "第二集"
-        assert card.episode_still_url == "https://image.tmdb.org/t/p/w500/e2.jpg"
+        assert card.episode_still_url == "https://image.tmdb.org/t/p/original/e2.jpg"
+        assert card.episode_still_original_url == "https://image.tmdb.org/t/p/original/e2.jpg"
+        assert card.overview == "第二集的简介"
         assert card.advanced is True
         assert card.position_ms == 0
         # 角标相对卡片这一集算：E02 之后还剩 E03 一集
@@ -491,6 +526,7 @@ async def test_a_movie_with_metadata_carries_its_runtime_and_aspect(db) -> None:
             title="示例电影",
             original_title="Movie",
             backdrop_path="/backdrop.jpg",
+            logo_path="/logo.png",
         )
         session.add(movie)
         await session.flush()
@@ -503,6 +539,8 @@ async def test_a_movie_with_metadata_carries_its_runtime_and_aspect(db) -> None:
                     runtime_minutes=130,
                     poster_width=1280,
                     poster_height=720,
+                    overview="电影简介",
+                    genres=["剧情", "科幻"],
                 ),
                 _state(movie.id, 0, 0, position_ms=3_600_000),
             ]
@@ -513,9 +551,43 @@ async def test_a_movie_with_metadata_carries_its_runtime_and_aspect(db) -> None:
         assert card.duration_ms == 7_200_000, "真实文件时长优先于档案里的 130 分钟"
         assert card.progress_percent == 50
         assert card.poster_aspect == 1.7778
-        assert card.backdrop_url == "https://image.tmdb.org/t/p/w780/backdrop.jpg"
+        assert card.backdrop_url == "https://image.tmdb.org/t/p/original/backdrop.jpg"
         assert card.episode_still_url is None
+        assert card.episode_still_original_url is None
         assert card.unwatched_ahead_count == 0
+        # 电视首页大图区：Logo 没下载到本地时退回 TMDB，简介与类型取影片档案
+        assert card.logo_url == "https://image.tmdb.org/t/p/original/logo.png"
+        assert card.overview == "电影简介"
+        assert card.genres == ["剧情", "科幻"]
+
+
+async def test_an_episode_without_its_own_overview_falls_back_to_the_show(db) -> None:
+    """这一集 TMDB 还没写简介（新剧常见）时，大图区讲整部剧，而不是空着。"""
+    async with db.session() as session:
+        library = await LibraryRepository(session).create(
+            name="剧集库", kind="tv", root_paths=["/tv"]
+        )
+        show = MediaItem(kind="tv", tmdb_id=11, title="新剧", original_title="New Show")
+        session.add(show)
+        await session.flush()
+        assert library.id and show.id
+        session.add_all(
+            [
+                _file(library.id, show.id, 1, 1),
+                MediaEpisode(
+                    media_item_id=show.id, season_number=1, episode_number=1, name="第一集"
+                ),
+                MediaMetadata(media_item_id=show.id, overview="整部剧的简介"),
+                _state(show.id, 1, 1, position_ms=600_000),
+            ]
+        )
+        await session.commit()
+
+        card = (await _cards(session, {library.id}))[0]
+        assert card.overview == "整部剧的简介"
+        assert card.episode_still_original_url is None, "没有 TMDB 剧照路径就不给原图地址"
+        assert card.logo_url is None
+        assert card.genres == []
 
 
 async def test_this_device_only_anchors_on_what_this_device_played(db) -> None:

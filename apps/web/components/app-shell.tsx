@@ -182,7 +182,7 @@ function AppShellBody({ children }: { children: React.ReactNode }) {
     (keyword: string, scope: SearchScope, options?: SearchSubmitOptions) => {
       router.push(
         buildSearchPath(
-          { keyword, scope, snapshotId: options?.snapshotId },
+          { keyword, also: options?.also, scope, snapshotId: options?.snapshotId },
           options?.vertical,
         ) as Route,
       );
@@ -270,7 +270,8 @@ function AppShellBody({ children }: { children: React.ReactNode }) {
   );
 
   // 移动端主区内容：设置路由挂「返回 + 标题」条（/settings 是分区列表页，
-  // /settings/[x] 是分区内容页，返回链固定 /settings/[x] → /settings → /my），
+  // /settings/[x] 是分区内容页，/settings/[x]/[y] 是分区里的详情页（插件详情），
+  // 返回链固定 /settings/[x]/[y] → /settings/[x] → /settings → /my），
   // 其余路由原样。两个主题的移动端共用这一段（设置返回条与列表页是基础实现）。
   const mobileMainContent =
     isSettings && MobileSettingsNav ? (
@@ -288,7 +289,9 @@ function AppShellBody({ children }: { children: React.ReactNode }) {
           backHref={
             (isSettingsIndex || (!isNetflix && activeSettings === "profile")
               ? "/my"
-              : "/settings") as Route
+              : pathname.split("/")[3]
+                ? `/settings/${activeSettings}`
+                : "/settings") as Route
           }
           historyBack={isSettingsIndex && !isNetflix}
         />
@@ -460,8 +463,7 @@ function navIdFromPath(pathname: string): string {
   if (pathname.startsWith("/library")) return "library";
   if (pathname.startsWith("/subscriptions")) return "subscriptions";
   if (pathname.startsWith("/activity")) return "tasks";
-  if (pathname.startsWith("/discover/movie")) return "explore-movies";
-  if (pathname.startsWith("/discover/tv")) return "explore-tv";
+  if (pathname.startsWith("/discover/")) return "discover";
   const session = /^\/sessions\/([^/]+)$/.exec(pathname);
   return session ? session[1] : "";
 }
@@ -477,10 +479,8 @@ function pathOfNavId(id: string): Route {
       return "/subscriptions";
     case "tasks":
       return "/activity" as Route;
-    case "explore-movies":
+    case "discover":
       return "/discover/movie" as Route;
-    case "explore-tv":
-      return "/discover/tv" as Route;
     default:
       return `/sessions/${id}` as Route;
   }

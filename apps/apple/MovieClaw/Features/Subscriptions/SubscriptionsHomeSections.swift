@@ -79,7 +79,7 @@ private struct SubsHomeRecentCard: View {
     @Environment(\.api) private var api
     @Environment(Router.self) private var router
 
-    private static let width: CGFloat = 264
+    private static let width: CGFloat = PhoneCardWidth.recent
     private var isTV: Bool { card.media.kind == "tv" }
 
     /// 第三行：什么时候到的、这一批还有几集、看到哪了
@@ -137,7 +137,8 @@ private struct SubsHomeRecentCard: View {
         Color.clear
             .aspectRatio(16 / 9, contentMode: .fit)
             .overlay {
-                RemoteImage(url: api.image(card.stillUrl ?? card.media.backdropUrl ?? card.media.posterUrl, .landscapeCard))
+                RemoteImage(url: api.image(card.stillUrl ?? card.media.backdropUrl ?? card.media.posterUrl,
+                                           width: ImageWidth.points(PhoneCardWidth.recent)))
             }
             .overlay(alignment: .bottom) {
                 LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .top, endPoint: .bottom)
@@ -171,7 +172,7 @@ private struct SubsHomeRecentCard: View {
     /// 卡片左下角的小号片名 Logo（没有就不画，片名在卡片下面）
     @ViewBuilder
     private var logo: some View {
-        if let raw = card.media.logoUrl, let url = api.image(raw) {
+        if let raw = card.media.logoUrl, let url = api.image(raw, width: ImageWidth.points(PhoneCardWidth.recentLogo)) {
             LazyImage(url: url) { state in
                 Group {
                     if let image = state.image {
@@ -182,7 +183,7 @@ private struct SubsHomeRecentCard: View {
                 }
                 .perfImage(url, state)
             }
-            .frame(maxWidth: 118, maxHeight: 34, alignment: .bottomLeading)
+            .frame(maxWidth: PhoneCardWidth.recentLogo, maxHeight: 34, alignment: .bottomLeading)
         }
     }
 }
@@ -360,7 +361,7 @@ private struct SubsHomeAgendaRow: View {
         Color.clear
             .frame(width: 92, height: 52)
             .overlay {
-                RemoteImage(url: api.image(entry.media?.backdropUrl ?? entry.media?.posterUrl, .landscapeCard))
+                RemoteImage(url: api.image(entry.media?.backdropUrl ?? entry.media?.posterUrl, width: ImageWidth.points(92)))
             }
             .overlay(alignment: .bottom) {
                 if let progress = entry.progress {
@@ -468,7 +469,7 @@ private struct SubsHomeSeeAllCard: View {
     }
 }
 
-/// 海报：只留一个状态小签 + 进行中剧集的当季收录细线，其余交给下面两行字。
+/// 海报只保留一个状态小签，收录数量放在下方文字中。
 /// 首页横滑与海报墙共用这一张，状态签与顺序两处一致；墙上多一行「规则组 → 媒体库」流向
 struct SubsHomePosterCard: View {
     let item: SubsHomeShelfItem
@@ -525,20 +526,9 @@ struct SubsHomePosterCard: View {
         Color.clear
             .aspectRatio(Theme.posterAspect, contentMode: .fit)
             .overlay {
-                RemoteImage(url: api.image(item.sub.media.posterUrl, .posterCard))
+                MeasuredRemoteImage(raw: item.sub.media.posterUrl)
                     .saturation(dimmed ? 0.35 : 1)
                     .brightness(dimmed ? -0.12 : 0)
-            }
-            .overlay(alignment: .bottom) {
-                if let progress = item.progress {
-                    ZStack(alignment: .bottom) {
-                        LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
-                            .frame(height: 34)
-                        SubsHomeProgressLine(value: progress, tint: .white.opacity(0.92), height: 2.5)
-                            .padding(.horizontal, 9)
-                            .padding(.bottom, 8)
-                    }
-                }
             }
             .overlay(alignment: .topLeading) {
                 if let chip = item.chip {

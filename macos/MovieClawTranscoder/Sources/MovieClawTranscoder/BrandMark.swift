@@ -1,61 +1,9 @@
 import AppKit
 
-/// movieclaw 的品牌标志（「极光」）：一笔写成的圆角播放三角，笔画是青绿 → 湖蓝 → 紫 → 粉的
-/// 极光渐变。与网页、iOS App 图标同一个图形（源文件见仓库 `docs/brand/`）。
-///
-/// 标志在这里是矢量：笔画的外轮廓、内轮廓两圈闭合折线（evenodd 填充出中间的三角镂空），
-/// 由网页端的定稿字形抽稀得到，最大误差约为 App 图标尺寸下的 0.1 像素。菜单栏的单色图标、
-/// 面板页眉的彩色徽标、App 图标都从同一份数据任意倍率画出来。
-/// `scripts/render-app-icon.sh` 也是编译这个文件来生成 `Resources/AppIcon.icns` 的。
-///
-/// 坐标归一化到 1×1 的正方形（y 向下），字形居中、最长边占满，绘制时再缩放进目标矩形。
+/// 转码器专用的三角循环标志：沿用 MovieClaw 极光色板，以回转箭头区分主程序。
+/// App 图标母版和菜单栏源稿见 `docs/brand/transcoder/`。
+/// 菜单栏用细笔画模板图；面板和设置页用较粗的彩色矢量标志。
 enum BrandMark {
-    /// 外轮廓（笔画外缘）
-    static let outer: [CGPoint] = pts([
-        (0.3564, 0.0357), (0.3291, 0.0267), (0.3098, 0.0217), (0.2897, 0.0181), (0.2682, 0.0160), (0.2467, 0.0158),
-        (0.2253, 0.0176), (0.2109, 0.0199), (0.1972, 0.0230), (0.1764, 0.0294), (0.1563, 0.0377), (0.1374, 0.0476),
-        (0.1195, 0.0593), (0.1080, 0.0682), (0.0972, 0.0776), (0.0821, 0.0930), (0.0685, 0.1098), (0.0565, 0.1277),
-        (0.0461, 0.1466), (0.0377, 0.1660), (0.0310, 0.1856), (0.0260, 0.2047), (0.0205, 0.2332), (0.0158, 0.2679),
-        (0.0118, 0.3063), (0.0087, 0.3442), (0.0053, 0.3966), (0.0023, 0.4631), (0.0009, 0.5158), (0.0002, 0.5731),
-        (0.0006, 0.6257), (0.0017, 0.6686), (0.0038, 0.7115), (0.0062, 0.7417), (0.0100, 0.7705), (0.0137, 0.7894),
-        (0.0190, 0.8091), (0.0234, 0.8221), (0.0313, 0.8412), (0.0409, 0.8599), (0.0481, 0.8719), (0.0602, 0.8891),
-        (0.0690, 0.8998), (0.0833, 0.9150), (0.0937, 0.9246), (0.1099, 0.9375), (0.1271, 0.9490), (0.1395, 0.9560),
-        (0.1582, 0.9650), (0.1714, 0.9701), (0.1911, 0.9763), (0.2049, 0.9796), (0.2254, 0.9829), (0.2392, 0.9842),
-        (0.2534, 0.9848), (0.2670, 0.9846), (0.2809, 0.9836), (0.2947, 0.9819), (0.3141, 0.9784), (0.3319, 0.9740),
-        (0.3483, 0.9692), (0.3721, 0.9614), (0.4035, 0.9503), (0.4574, 0.9296), (0.5061, 0.9093), (0.5680, 0.8816),
-        (0.6202, 0.8565), (0.6803, 0.8257), (0.7353, 0.7954), (0.7938, 0.7611), (0.8385, 0.7330), (0.8584, 0.7197),
-        (0.8823, 0.7030), (0.9035, 0.6872), (0.9177, 0.6755), (0.9280, 0.6660), (0.9379, 0.6560), (0.9476, 0.6448),
-        (0.9569, 0.6326), (0.9654, 0.6195), (0.9728, 0.6059), (0.9761, 0.5989), (0.9820, 0.5844), (0.9846, 0.5769),
-        (0.9887, 0.5621), (0.9904, 0.5544), (0.9928, 0.5389), (0.9940, 0.5234), (0.9939, 0.5078), (0.9927, 0.4922),
-        (0.9917, 0.4844), (0.9887, 0.4693), (0.9867, 0.4617), (0.9820, 0.4468), (0.9761, 0.4323), (0.9727, 0.4252),
-        (0.9654, 0.4117), (0.9568, 0.3985), (0.9479, 0.3867), (0.9336, 0.3705), (0.9238, 0.3609), (0.9104, 0.3489),
-        (0.8780, 0.3230), (0.8473, 0.3003), (0.8034, 0.2701), (0.7713, 0.2491), (0.7348, 0.2260), (0.7017, 0.2059),
-        (0.6685, 0.1864), (0.6352, 0.1674), (0.6011, 0.1488), (0.5415, 0.1178), (0.5070, 0.1008), (0.4720, 0.0842),
-        (0.4458, 0.0723), (0.4148, 0.0588), (0.3841, 0.0462),
-    ])
-
-    /// 内轮廓（三角镂空的边）
-    static let inner: [CGPoint] = pts([
-        (0.2945, 0.1902), (0.2755, 0.1821), (0.2682, 0.1797), (0.2594, 0.1776), (0.2507, 0.1768), (0.2443, 0.1770),
-        (0.2359, 0.1784), (0.2280, 0.1808), (0.2201, 0.1844), (0.2130, 0.1890), (0.2066, 0.1944), (0.2010, 0.2005),
-        (0.1973, 0.2058), (0.1933, 0.2133), (0.1909, 0.2195), (0.1886, 0.2286), (0.1865, 0.2433), (0.1849, 0.2623),
-        (0.1763, 0.3877), (0.1729, 0.4558), (0.1712, 0.5099), (0.1705, 0.5599), (0.1705, 0.6008), (0.1722, 0.7221),
-        (0.1728, 0.7412), (0.1735, 0.7507), (0.1747, 0.7590), (0.1762, 0.7662), (0.1801, 0.7774), (0.1844, 0.7856),
-        (0.1871, 0.7897), (0.1912, 0.7951), (0.1960, 0.8002), (0.2048, 0.8078), (0.2108, 0.8118), (0.2168, 0.8150),
-        (0.2232, 0.8178), (0.2299, 0.8200), (0.2414, 0.8223), (0.2527, 0.8227), (0.2599, 0.8220), (0.2669, 0.8207),
-        (0.2749, 0.8186), (0.2870, 0.8144), (0.3854, 0.7753), (0.4394, 0.7529), (0.4840, 0.7331), (0.5288, 0.7120),
-        (0.5766, 0.6881), (0.6124, 0.6692), (0.6437, 0.6520), (0.6825, 0.6296), (0.7969, 0.5598), (0.8092, 0.5521),
-        (0.8184, 0.5457), (0.8247, 0.5402), (0.8288, 0.5356), (0.8326, 0.5289), (0.8347, 0.5217), (0.8352, 0.5143),
-        (0.8340, 0.5067), (0.8305, 0.4987), (0.8257, 0.4925), (0.8195, 0.4868), (0.8047, 0.4759), (0.6867, 0.3969),
-        (0.6450, 0.3704), (0.5952, 0.3404), (0.5677, 0.3246), (0.5326, 0.3051), (0.4928, 0.2839), (0.4612, 0.2678),
-        (0.4005, 0.2385),
-    ])
-
-    private static func pts(_ raw: [(CGFloat, CGFloat)]) -> [CGPoint] {
-        raw.map { CGPoint(x: $0.0, y: $0.1) }
-    }
-
-    /// 极光渐变四档，沿左下 → 右上铺开（与网页 / iOS 图标同一组色值）。
     static let aurora: [NSColor] = [
         NSColor(srgbRed: 0x36 / 255.0, green: 0xE2 / 255.0, blue: 0xBD / 255.0, alpha: 1),
         NSColor(srgbRed: 0x4C / 255.0, green: 0x9D / 255.0, blue: 0xFF / 255.0, alpha: 1),
@@ -63,38 +11,57 @@ enum BrandMark {
         NSColor(srgbRed: 0xFF / 255.0, green: 0x7F / 255.0, blue: 0xCF / 255.0, alpha: 1),
     ]
 
-    /// 把标志画进 `rect`（取其中最大的正方形居中）。
-    ///
-    /// - Parameter template: true 时画成单色剪影（菜单栏模板图用）。
+    /// 与菜单栏 SVG 相同的 18×18 坐标系（y 向下），箭头是循环轮廓的一部分。
+    private static let centerline: CGPath = {
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: 6, y: 2.55))
+        path.addCurve(to: CGPoint(x: 2.6, y: 4.6),
+                      control1: CGPoint(x: 4.15, y: 1.7), control2: CGPoint(x: 2.6, y: 2.65))
+        path.addLine(to: CGPoint(x: 2.6, y: 13.4))
+        path.addCurve(to: CGPoint(x: 6, y: 15.35),
+                      control1: CGPoint(x: 2.6, y: 15.45), control2: CGPoint(x: 4.15, y: 16.3))
+        path.addLine(to: CGPoint(x: 14.15, y: 10.9))
+        path.addCurve(to: CGPoint(x: 14.15, y: 7.15),
+                      control1: CGPoint(x: 15.9, y: 9.95), control2: CGPoint(x: 15.9, y: 8.1))
+        path.addLine(to: CGPoint(x: 9, y: 4.35))
+        path.move(to: CGPoint(x: 9.4, y: 6.7))
+        path.addLine(to: CGPoint(x: 9, y: 4.35))
+        path.addLine(to: CGPoint(x: 11.6, y: 3.9))
+        return path
+    }()
+
     static func draw(in rect: NSRect, template: Bool = false) {
         guard let context = NSGraphicsContext.current else { return }
-        let side = min(rect.width, rect.height)
-        let origin = NSPoint(x: rect.midX - side / 2, y: rect.midY - side / 2)
-        // 坐标 y 向下；非翻转的上下文里要把 y 翻过来
+        let shape = centerline.copy(strokingWithWidth: template ? 1.7 : 2.15,
+                                    lineCap: .round, lineJoin: .round, miterLimit: 10)
+        // 模板图保留 18pt 源稿的边距；彩色徽标占满目标矩形，沿用原来的图标比例。
+        let bounds = template ? CGRect(x: 0, y: 0, width: 18, height: 18) : shape.boundingBoxOfPath
+        let scale = min(rect.width, rect.height) / max(bounds.width, bounds.height)
+        let origin = CGPoint(x: rect.midX - bounds.width * scale / 2,
+                             y: rect.midY - bounds.height * scale / 2)
         let flipped = context.isFlipped
-        func map(_ p: CGPoint) -> NSPoint {
-            NSPoint(x: origin.x + p.x * side, y: flipped ? origin.y + p.y * side : origin.y + side - p.y * side)
-        }
-        let shape = NSBezierPath()
-        for ring in [outer, inner] {
-            shape.move(to: map(ring[0]))
-            ring.dropFirst().forEach { shape.line(to: map($0)) }
-            shape.close()
-        }
-        shape.windingRule = .evenOdd
-
-        context.saveGraphicsState()
+        var transform = CGAffineTransform(
+            a: scale, b: 0, c: 0, d: flipped ? scale : -scale,
+            tx: origin.x - bounds.minX * scale,
+            ty: flipped ? origin.y - bounds.minY * scale : origin.y + bounds.maxY * scale
+        )
+        guard let mapped = shape.copy(using: &transform) else { return }
+        let cg = context.cgContext
+        cg.saveGState()
+        cg.addPath(mapped)
         if template {
-            NSColor.black.setFill()
-            shape.fill()
+            cg.setFillColor(NSColor.black.cgColor)
+            cg.fillPath()
         } else {
-            // 左下 → 右上：非翻转坐标里是 42°，翻转坐标里角度方向相反
-            NSGradient(colors: aurora)?.draw(in: shape, angle: flipped ? -42 : 42)
+            cg.clip()
+            let locations: [CGFloat] = [0, 0.35, 0.68, 1]
+            NSGradient(colors: aurora, atLocations: locations, colorSpace: .sRGB)?
+                .draw(in: rect, angle: flipped ? -42 : 42)
         }
-        context.restoreGraphicsState()
+        cg.restoreGState()
     }
 
-    /// 品牌方块：纯黑（顶部极淡提亮）圆角方块 + 极光标志。面板页眉、设置「关于」页、App 图标都用它。
+    /// 面板页眉和设置「关于」页使用的品牌方块。
     static func drawTile(in rect: NSRect, cornerRatio: CGFloat = 0.225) {
         let radius = rect.width * cornerRatio
         let tile = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
@@ -103,14 +70,12 @@ enum BrandMark {
             NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1),
         ])
         gradient?.draw(in: tile, angle: -90)
-        // 顶边一道极淡的高光，深色菜单与深色窗口里方块才不会糊进背景
         NSGraphicsContext.saveGraphicsState()
         tile.addClip()
         NSColor.white.withAlphaComponent(0.10).setStroke()
         tile.lineWidth = max(1, rect.width / 48)
         tile.stroke()
         NSGraphicsContext.restoreGraphicsState()
-        // 字形占方块宽度约 64%，与 iOS App 图标同一比例（视觉面积对齐 App Store、音乐等同类线条图标）
         draw(in: rect.insetBy(dx: rect.width * 0.18, dy: rect.height * 0.18))
     }
 }

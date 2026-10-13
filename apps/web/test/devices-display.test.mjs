@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   activityLabel,
   deviceLive,
+  deviceGlyph,
+  identityParts,
   STALE_AFTER_DAYS,
   clientTypeLabel,
   deviceGroupKey,
@@ -28,7 +30,7 @@ const NOW = Date.parse("2026-08-29T12:00:00Z");
 const ago = (ms) => new Date(NOW - ms).toISOString();
 
 test("权限说明说人话，不出现内部权限名", () => {
-  for (const type of ["worker", "cli", "manual", "什么鬼"]) {
+  for (const type of ["worker", "cli", "manual", "androidtv", "什么鬼"]) {
     for (const role of ["admin", "member"]) {
       const { title, body } = grantSummary(type, role);
       const text = `${title}${body}`;
@@ -140,14 +142,21 @@ test("设备按类型分组：人用的在前，程序代操作的其次，播�
   );
 });
 
-test("空组不出现；不认识的新类型与服务端同口径归入配对类", () => {
+test("空组保留；不认识的新类型与服务端同口径归入配对类", () => {
   assert.deepEqual(
     groupDevices([{ kind: "web" }]).map((g) => g.label),
-    ["浏览器"],
+    ["浏览器", "App", "命令行与转码器", "播放器"],
   );
+  assert.deepEqual(groupDevices([]).map((group) => group.devices.length), [0, 0, 0, 0]);
   assert.equal(deviceGroupKey("android"), "app");
   assert.equal(deviceGroupKey("tvos"), "app");
+  assert.equal(deviceGroupKey("androidtv"), "app");
   assert.equal(deviceGroupKey("未来的新客户端"), "paired");
+});
+
+test("本机即使缺少活动时间也在线，与 iPhone 口径一致", () => {
+  assert.equal(deviceLive({ kind: "web", scope: "full", connected: false, last_seen_at: null, current: true }, NOW), true);
+  assert.equal(deviceLive({ kind: "ios", scope: "full", connected: false, last_seen_at: ago(6 * MINUTE), current: false }, NOW), false);
 });
 
 test("超过 90 天没活跃才提示，没有活跃记录按签发时间算", () => {
@@ -254,4 +263,63 @@ test("没有长连接的设备仍按最近 5 分钟有没有用过", () => {
   assert.equal(activityLabel(phone, now), "3 分钟前");
   const cli = { kind: "cli", scope: "full", connected: false, last_seen_at: "2026-09-27T10:00:00Z" };
   assert.equal(deviceLive(cli, now), false);
+});
+
+test("设备图标按形态挑，转码凭证一律是转码器", () => {
+  assert.equal(deviceGlyph("ios", "full"), "phone");
+  assert.equal(deviceGlyph("tvos", "full"), "tv");
+  assert.equal(deviceGlyph("androidtv", "full"), "tv");
+  assert.equal(deviceGlyph("web", "full"), "browser");
+  assert.equal(deviceGlyph("worker", "transcode"), "transcoder");
+  assert.equal(deviceGlyph("manual", "transcode"), "transcoder");
+  assert.equal(deviceGlyph("manual", "full"), "terminal");
+  assert.equal(deviceGlyph("jellyfin", "full"), "player");
+  assert.equal(deviceGlyph("something-new", "full"), "terminal");
+});
+
+test("设备说明：图标说得清的不再写类型名，系统信息拆成整块", () => {
+  const app = {
+    kind: "ios",
+    kind_label: "iOS App",
+    platform: "iOS 26.6.2 · iPhone18,4",
+    client_version: "0.4.0",
+  };
+  assert.deepEqual(identityParts(app), [
+    "iOS 26.6.2",
+    "iPhone18,4",
+    "版本 0.4.0",
+  ]);
+  // 没报系统信息的 App：类型名留着，否则这一行什么都不剩
+  assert.deepEqual(
+    identityParts({ ...app, platform: null, client_version: null }),
+    ["iOS App"],
+  );
+  // 浏览器的名字就是「Safari · iPhone」，再写「浏览器」是重复
+  assert.deepEqual(
+    identityParts({
+      kind: "web",
+      kind_label: "浏览器",
+      platform: null,
+      client_version: null,
+    }),
+    [],
+  );
+  assert.deepEqual(
+    identityParts({
+      kind: "manual",
+      kind_label: "手工令牌",
+      platform: null,
+      client_version: null,
+    }),
+    ["手工令牌"],
+  );
+  assert.deepEqual(
+    identityParts({
+      kind: "jellyfin",
+      kind_label: "Infuse",
+      platform: null,
+      client_version: "8.1",
+    }),
+    ["Infuse", "版本 8.1"],
+  );
 });
