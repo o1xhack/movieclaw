@@ -15,13 +15,13 @@ struct AboutView: View {
             Section {
                 LabeledContent("版本", value: Self.versionText)
                 Link(destination: URL(string: "https://github.com/movieclaw/movieclaw")!) {
-                    Label("项目主页（开源）", systemImage: "chevron.left.forwardslash.chevron.right")
+                    Label("MovieClaw 原项目主页", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
                 Link(destination: URL(string: "https://github.com/movieclaw/movieclaw/blob/main/docs/privacy-policy.md")!) {
                     Label("隐私政策", systemImage: "hand.raised")
                 }
             } footer: {
-                Text("MovieClaw 是自托管服务的客户端：你的媒体、账号与观看记录都在你自己部署的服务器上，App 不向开发者或任何第三方上传数据。")
+                Text("Luca Cinema 基于 MovieClaw v0.30.0 修改，用于个人非商业测试。本版修改了客户端名称、图标与应用签名标识，服务器协议与播放引擎保持原实现。你的媒体、账号与观看记录都在你自己部署的服务器上。原作者版权及许可证继续保留。App 不向开发者或任何第三方上传数据。")
             }
 
             Section {
@@ -78,8 +78,11 @@ struct OpenSourceComponent: Identifiable {
     var id: String { name }
 
     static let all: [OpenSourceComponent] = [
+        .init(name: "MovieClaw（Luca Cinema 基于此项目修改）", license: "修改版 Apache-2.0，附非商业限制",
+              source: "https://github.com/movieclaw/MovieClaw/tree/v0.30.0",
+              licenseFiles: ["License-MovieClaw"]),
         .init(name: "AetherEngine（MovieClaw 修改版）", license: "LGPL-3.0，附 App Store 例外",
-              source: "https://github.com/movieclaw/movieclaw/tree/main/apps/apple/Vendor/AetherEngine",
+              source: "https://github.com/movieclaw/MovieClaw/tree/v0.30.0/apps/apple/Vendor/AetherEngine",
               licenseFiles: ["License-AetherEngine", "License-GPL-3.0"]),
         .init(name: "FFmpeg", license: "LGPL-2.1 或更新版本",
               source: "https://github.com/superuser404notfound/FFmpegBuild",

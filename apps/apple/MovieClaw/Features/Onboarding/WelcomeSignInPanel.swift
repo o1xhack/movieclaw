@@ -283,7 +283,7 @@ struct WelcomeSignInPanel: View {
         if setup { return "初始化这台服务器" }
         switch purpose {
         case .connect: return "连接服务器"
-        case .signIn: return "登录 MovieClaw"
+        case .signIn: return "登录 Luca Cinema"
         case .reauth: return "重新登录"
         case .addAccount: return "添加账号"
         }

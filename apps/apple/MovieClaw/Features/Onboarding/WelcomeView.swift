@@ -263,7 +263,7 @@ private struct WelcomeMasthead: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Text("\(Text("Movie"))\(Text("Claw").italic())")
+            Text("\(Text("Luca")) \(Text("Cinema").italic())")
                 .font(.system(size: 46, weight: .light, design: .serif))
                 .tracking(revealed ? 1 : 12)
                 .foregroundStyle(Theme.accentStrong)
@@ -275,7 +275,7 @@ private struct WelcomeMasthead: View {
                 .frame(width: revealed ? 28 : 0, height: 0.5)
                 .animation(.easeInOut(duration: 1.2).delay(revealed ? 1.4 : 0), value: revealed)
 
-            Text("智能影音服务器")
+            Text("你的私人影音库")
                 .font(.welcomeSerif(size: 13))
                 .tracking(8)
                 .foregroundStyle(Theme.textMuted)
