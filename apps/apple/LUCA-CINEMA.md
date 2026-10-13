@@ -57,3 +57,21 @@ LUCA_BUILD_NUMBER=3 apps/apple/scripts/luca-testflight.sh
 按用户指定，将同一 Archive 内的 Development 签名 App 直接更新安装到 `the silver sword`（iPhone 17 Pro Max）。设备安装清单确认从 0.5.0（1）更新为 0.7.0（3）；启动命令成功，随后查询确认 App 进程仍在运行。未卸载 App 或清空数据，未上传本版 TestFlight。
 
 设备通过 CoreDevice 可无线安装，但当前 sim-use 仅识别另一台已连接的 iPhone，无法读取此设备界面。因此登录状态、数据保留结果与 NAS 播放尚未实测。安装前后版本、安装结果、启动和进程记录保存在上述构建目录的 `sword-*.json` 中。
+
+
+## ChatGPT 订阅接入与 0.7.0（4）（2026-10-13）
+
+通用功能从干净上游 `598cddaa` 开始，提交 `f1bfde04` 已推到独立功能分支并提交 [上游 PR #846](https://github.com/movieclaw/MovieClaw/pull/846)。PR 只包含官方 ChatGPT 订阅授权、服务端协议、电脑 loopback 助手、Web/iOS 入口与验证；不包含 Luca 品牌、签名、服务器地址或个人凭据。真实订阅推理尚未验证，当前保留 Draft 状态。GitHub 已运行的 Python、Go、Web、iPhone、Mac、TV 等检查均通过；跳过的作业不计入已验证结果。
+
+私人分支 `luca-cinema-chatgpt` 在现有 0.37.0 基础上 cherry-pick 为 `902c9543`；解决两处版本上下文冲突，保留原有私人发行配置。本地私人后端 165 项回归与 Go 全套测试通过，Web 生产构建完成。
+
+Luca Cinema 0.7.0（4）Archive 和 App Store Connect 方式的 IPA 导出完成。Bundle ID、Team、App Group 与显示名称保持本文件原有配置；Development 签名和 Silver Sword 设备授权已核对。首次无线安装因 CoreDevice 连接超时失败，随后设备查询显示 tunnel unavailable；此版本尚未确认安装或启动，不能用编译或 Simulator 替代真机结果。未上传这版 TestFlight。
+
+- 构建目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/ChatGPTPlan-20261013/Luca-070-4`
+- IPA：`Export/LucaCinema-0.7.0-4.ipa`
+- IPA SHA-256：`097cb5489c9efbecc90f669c52e6c620c336a2c3440456786465518e9a922521`
+- 核验：`build-verification.json`；真机连接错误：`sword-install.json`、`sword-before-retry.json`
+
+NAS 已使用 `local/movieclaw-chatgpt:0.37.0-20261013`，基于原始本地镜像加入此功能的后端、匹配的 API 目录、CLI 和 Web 产物。仅重建 MovieClaw，未重建 qBittorrent。Compose 与在线 SQLite 备份位于 NAS `/volume1/docker/movieclaw/chatgpt-build-20261013/backup`，数据库 quick_check 为 ok，部署后 MovieClaw 健康检查通过，现有供应商仍可读取，实际 NAS Web 已显示 ChatGPT 接入步骤。上游正式版本包含此功能前，普通官方镜像或应用内更新可能不含这个私人补丁；后续更新需要重新合入或确认上游已发布，不能将本地功能镜像误认为官方 Release。
+
+Mac 的 `~/.local/bin/mclaw` 已安装并通过用户批准的本机助手配对。认证文件按标准 CLI 位置保存，目录 0700、凭据 0600，未记录在项目或 PR。官方 OpenAI 页面已到达 Luca Cinema 授权步骤；NAS 中尚未创建 ChatGPT 供应商，待实际授权与一次推理/工具调用验证。
