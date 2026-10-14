@@ -6777,11 +6777,11 @@ nonisolated extension API {
         var maxOutputTokens: Int?
         var defaultOutputTokens: Int?
         var supportsTools: Bool
-        var requiresResponsesForTools: Bool
-        var chatToolsRequireNoReasoning: Bool
-        var maxTokensParameter: String
-        var samplingRequiresNoReasoning: Bool
-        var fixedSampling: Bool
+        var requiresResponsesForTools: Bool?
+        var chatToolsRequireNoReasoning: Bool?
+        var maxTokensParameter: String?
+        var samplingRequiresNoReasoning: Bool?
+        var fixedSampling: Bool?
         var supportsParallelToolCalls: Bool
         var supportsThinking: Bool
         var maxThinkingTokens: Int?
