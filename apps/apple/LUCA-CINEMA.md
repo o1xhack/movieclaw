@@ -1,6 +1,8 @@
 # Luca Cinema 个人构建与安装记录
 
-基于 MovieClaw v0.37.0，当前真机直接安装版本 0.7.0（构建 7）；TestFlight 最新仍为 0.7.0（构建 5），最低 iOS 26。
+基于 MovieClaw v0.38.0 / iOS 0.8.0，当前真机直接安装版本 0.8.0（构建 9）；最近已验证的 TestFlight 为 0.7.0（构建 5），本轮未上传 TestFlight，最低 iOS 26。
+
+当前订阅接入只在 Web / 电脑助手添加和管理；iOS 读取服务器已有模型，并保留模型与思考强度选择。下方 0.7.0 手机内授权记录属于历史版本，已由本版替代。
 
 - 显示名称：Luca Cinema。
 - Bundle ID：com.o1xhack.lucacinema.app。
@@ -126,3 +128,24 @@ NAS 部署镜像 `local/movieclaw-chatgpt-review:0.37.0-20261013`（`69d8486b45e
 - 回归与界面：`review-regressions.xml`、`private-review-tests.log`、`ReviewUITest.xcresult`、`ReviewUIAttachments`
 - 真实工具用例与部署：`real-tool-result.log`、`nas-review-deploy.log`、`review-verification.json`
 - 验证边界：其他模型、真实远端撤销、额度耗尽、加密推理条目回放与本版真机媒体播放未全部实测。
+
+## 0.38.0 / iOS 0.8.0（9）与 Web 管理接入（2026-10-13）
+
+完整合入官方 `v0.38.0`（`ca019529b3c34cd67ef0571efad661dbf8b2df66`），私人 merge 为 `96da2976`。保留 Luca 名称、LC 图标、独立 Bundle ID / App Group、签名配置以及已有通用 ChatGPT 增强。重新生成原生 SDK，新增协议能力字段可兼容旧服务器缺字段的响应，并在编辑模型时保留。
+
+按用户要求，iOS 移除订阅添加、登录、重新授权、用量链接与对应回调监听器；已有接入详情只读，没有编辑、删除或重新测试按钮。Web / 电脑助手负责授权与管理，App 继续使用服务器返回的模型和思考档位。外层快捷框保持一行，展开后再显示选项。通用提交 `c8d9ad50` / `7b1d5605` 已更新 [PR #846](https://github.com/movieclaw/MovieClaw/pull/846)，私人同步为 `d4726de9` / `28d71b03`。PR 最新提交全部已执行 CI 通过，跳过作业不计入通过；PR 为 ready for review，尚未合并。私人品牌、签名、地址和凭据未进入 PR。
+
+NAS 已部署 `local/movieclaw-chatgpt:v0.38.0-20261013`，基于官方 0.38.0 镜像固定摘要及合入后的服务器源码、迁移和 Web 构建。健康检查确认版本 0.38.0、spec `457a3d85fd61b777`。只重建 MovieClaw，qBittorrent 身份及运行状态未改变，Plex identity 可读取；原有下载任务过滤代码与升级前一致。Compose 和部署前在线 SQLite 备份保存在 NAS `/volume1/docker/movieclaw/upgrade038-20261013/backup` 与 `/app/data/manual-backups/upgrade038-20261013`，未复制生产数据库或密钥到本地构建材料。
+
+正式切换前，以禁网容器迁移 NAS 上的隔离数据库副本：迁移到 `9f3c6a2e1b58`，quick_check 为 ok，两家模型供应商、加密凭据可解密、GPT-6.1 五档能力和实例身份均保留。副本未执行 OAuth 刷新。0.38 数据库已迁移，回退旧镜像必须配合升级前数据库备份和匹配的密钥。
+
+升级后，真实账号接入再次测试为 active；GPT-6.1-sol high 的 namespaced `qa_echo` 两轮调用、工具结果回传和最终 `QA OK` 均成功。请求接受 encrypted_content，但未返回推理条目，不视为已测试加密回放。
+
+- 公共分支和私人分支各 248 项定向 Python 回归通过、5 项依赖本机 FFmpeg / Mac kernel / HDR 样本的集成测试跳过；Go 全套和 Web 生产构建通过。
+- 新模型兼容与快捷草稿两项原生测试通过；两项生产 Simulator UI 测试确认接入只读、添加菜单无订阅，以及快捷框展开后 GPT-6.1 模型与五档控件仍可用。截图已人工查看。
+- 隔离服务器的真实原生离线流程通过：下载合成影片、拒绝代理 TCP 连接、冷启动并播放本地影片、恢复连接并同步进度。没有在生产服务器删除媒体或测试下载任务。
+- 容器启动监督用例在隔离 Linux 候选镜像内通过：一轮 15 项通过，补齐测试环境的 `pgrep` 后剩余一项通过。原先本机 3000 / 3001 占用时的失败不算通过，未终止其他项目服务。
+
+Luca Cinema 0.8.0（9）Archive 成功。主 App 和两个扩展版本一致，签名验证通过，Development profile 包含目标手机，get-task-allow 为 true，App Group 正确；已查看 LC 源图及实际编译图标。CoreDevice 覆盖更新安装到 Silver Sword，回读 0.8.0（9），启动及存活进程确认成功；未卸载或清空 App 数据。本轮未上传 TestFlight，未提交 App Store 审核。当前 sim-use 未识别此目标手机，因此新界面与离线流程的自动化证据来自 Simulator，不能视为真机播放验收。
+
+证据目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Upgrade038-20261013`。最终 Archive、签名和手机安装/回读/启动记录在 `Luca-080-9`；总核验为 `upgrade-verification.json`，界面截图在 `WebManagedShots`。构建 8 是同轮升级的中间安装，已由构建 9 替代。
