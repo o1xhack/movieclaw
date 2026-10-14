@@ -1,6 +1,6 @@
 # Luca Cinema 个人 TestFlight 构建
 
-基于 MovieClaw v0.37.0，iOS 版本 0.7.0（构建 3），最低 iOS 26。
+基于 MovieClaw v0.37.0，当前 iOS TestFlight 版本 0.7.0（构建 5），最低 iOS 26。
 
 - 显示名称：Luca Cinema。
 - Bundle ID：com.o1xhack.lucacinema.app。
@@ -88,3 +88,22 @@ App ID 仍为 `6818384408`，本版 build ID 为 `0529f942-bca1-4a47-8c9d-c1bb08
 官方 ChatGPT 接入入口已包含在本版，真实账号授权/订阅推理仍待完成，上游 PR 保持 Draft。待用户从 TestFlight 更新后进行 NAS 登录与实际播放验证。
 
 管理入口：https://appstoreconnect.apple.com/apps/6818384408/testflight/ios
+
+## iPhone 直接 ChatGPT 登录与 0.7.0（5）（2026-10-13）
+
+本版补齐手机内的订阅登录：模型接入 → 连接 ChatGPT 订阅 → **Continue with ChatGPT**。系统 Safari 控制器打开官方登录页，手机上只绑定 `127.0.0.1` 的监听器接收回调，再通过已有认证接口交回服务器；PKCE 与令牌仍由服务器持有。取消页面关闭监听器，可重新登录；电脑命令保留为可展开的替代方式。
+
+通用上游提交为 `3ef99529bbd6a36e9e3456a05ad68a5c7f90fd0d`，已更新同一 [PR #846](https://github.com/movieclaw/MovieClaw/pull/846)。私人 cherry-pick 为 `8344178d43fa5341afafb94b83235f1a9f64aa37`。上游已执行的 iPhone、Mac、TV、Python 分片、Go 和 Web 检查全部通过；跳过作业不视为验证。本次仅更新 iOS，沿用 NAS 已部署的授权接口，没有更改公网或下载器配置。
+
+3 项原生回调测试通过，覆盖 Host/state/重复参数拒绝、真实 socket、一次性完成与取消后关闭端口。生产 Simulator 界面已打开真实官方登录页，取消/重试正常；使用模拟授权码与模拟 OpenAI 令牌/模型响应，走完真实服务器交换与加密保存并显示已连接账号。真实账号授权、订阅推理及真机播放仍待用户验证，PR 保持 Draft。
+
+0.7.0（5）已上传并由 Apple 处理为 `VALID`，内部状态 `IN_BETA_TESTING`；通过 Luca Personal 的 builds relationship 确认已进入原内部组。中英文测试说明已写入并回读。主 App 和两个扩展的 Distribution 签名、版本、Bundle ID 与 App Group 已核验；源图标、实际编译图标和 Apple CDN 图标均为 LC。未提交外部 Beta App Review。
+
+- Build ID：`62081ab0-c70c-4452-8fbe-aecda8619719`
+- 构建目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/ChatGPTPlan-20261013/Luca-070-5`
+- IPA：`Export/LucaCinema-0.7.0-5.ipa`
+- SHA-256：`892f7d716ea58687f173de64b380fadafcd98d76873513746693b1a86482836d`
+- 核验：`build-verification.json`、`asc-build-state.json`、`altool-build-status.json`；上传日志 `upload.log`
+- 手机流程测试：上一层目录的 `mobile-qa-verification.json`、`mobile-official-login.png` 与 `mobile-connected.png`
+
+Xcode 自行生成的两个分发诊断包均已移到本版 SSD 构建目录，Apple 凭据未写入仓库。
