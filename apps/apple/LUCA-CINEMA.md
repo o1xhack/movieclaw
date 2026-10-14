@@ -1,17 +1,17 @@
-# Luca Cinema 个人 TestFlight 构建
+# Luca Cinema 个人构建与安装记录
 
-基于 MovieClaw v0.37.0，当前 iOS TestFlight 版本 0.7.0（构建 5），最低 iOS 26。
+基于 MovieClaw v0.37.0，当前真机直接安装版本 0.7.0（构建 7）；TestFlight 最新仍为 0.7.0（构建 5），最低 iOS 26。
 
 - 显示名称：Luca Cinema。
 - Bundle ID：com.o1xhack.lucacinema.app。
 - 客户端使用独立 LC 图标；服务器仍为 MovieClaw。
-- AetherEngine、FFmpeg 和服务端协议未改名、未修改。
+- AetherEngine、FFmpeg 保留上游名称；ChatGPT 接入作为通用增强单独提交上游。
 - 关于页附带 MovieClaw 完整许可证与修改声明（Shared/Resources/Licenses），保留依赖版权和许可。
 - 当前仅作个人非商业内部 TestFlight 测试，未提交正式 App Store 审核。
 
 本机签名由忽略的 XcodeConfig/Signing.local.xcconfig 配置。所有新构建、导出和日志放在 /Volumes/StudioSSD/Developer/BuildScratch/MovieClaw 下。App Store Connect 凭据从全局 Apple secret helper 读取，不写入仓库。
 
-首次安装后，填写自己的 MovieClaw 服务器地址并登录。家庭公网访问配置属于独立任务，此次构建不修改 NAS 或路由器。
+首次安装后，填写自己的 MovieClaw 服务器地址并登录。家庭公网访问配置属于独立任务；后续服务端功能部署见各版本验证记录。
 
 ## 已验证的 TestFlight 状态（2026-10-01）
 
@@ -107,3 +107,22 @@ App ID 仍为 `6818384408`，本版 build ID 为 `0529f942-bca1-4a47-8c9d-c1bb08
 - 手机流程测试：上一层目录的 `mobile-qa-verification.json`、`mobile-official-login.png` 与 `mobile-connected.png`
 
 Xcode 自行生成的两个分发诊断包均已移到本版 SSD 构建目录，Apple 凭据未写入仓库。
+
+
+## 思考强度、快捷新会话与维护者反馈：0.7.0（6 / 7）（2026-10-13）
+
+构建 6 已直接安装，补齐 GPT-6.1-sol 能力元数据与快捷新会话模型选择。外层保持一行小输入框；展开后显示模型按钮，菜单内选择思考强度，并传给新会话第一条消息。随后构建 7 合入上游维护者反馈：预览与账号文案、断开提醒、授权错误和凭据安全等修复，已更新安装在 Silver Sword，回读为 0.7.0（7），启动成功。采用 Development 签名且 get-task-allow 为 true，现有 App 数据保留；6、7 均未上传 TestFlight。
+
+通用代码为 `887606b0`，私人 cherry-pick 为 `2a6b4d55`；上游验证记录为 `aee887af`，私人同步为 `34c47e3e`。私人 v0.37 没有上游新增的 models/discover 端点，因此该单个用例明确跳过，相关修复在上游 PR 中保留。
+
+[PR #846](https://github.com/movieclaw/MovieClaw/pull/846) 已更新全部维护者反馈，并由 Draft 转为 ready for review，尚未合并。用户本人已确认手机真实账号登录与使用成功；NAS 默认模型连接测试为 active，已确认订阅 scope，并使用 GPT-6.1-sol high 档跑通 namespaced qa_echo 两轮调用及终态完成。请求接受 encrypted_content，但回显用例没有推理条目，不作为加密推理回放证据。
+
+上游定向回归 198 项通过；私人 168 项通过、1 项因端点不在此基线跳过；两项生产 Simulator UI 测试确认快捷输入框折叠/展开行为与断开提醒。Go ChatGPT 用例、Web TypeScript/ESLint/生产构建通过。更新提交的 CI 仍在运行时，不视为全部通过。真机安装和启动由 CoreDevice 验证；sim-use 当前只能识别另一台手机，未在错误设备上操作，也未声称真机新控件已自动验收。
+
+NAS 部署镜像 `local/movieclaw-chatgpt-review:0.37.0-20261013`（`69d8486b45e0`），包含累积后台修复及私人网页构建，健康检查通过。原 Compose 和在线 SQLite 备份留在 NAS，qBittorrent 容器身份与正常运行状态未改变，Plex identity 仍可读取。
+
+- 本次证据目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/ReasoningFix-20261013`
+- 构建 7：`Luca-070-7/LucaCinema.xcarchive`、`build-verification.json`、`sword-install.json`、`sword-after.json`、`sword-launch.json`
+- 回归与界面：`review-regressions.xml`、`private-review-tests.log`、`ReviewUITest.xcresult`、`ReviewUIAttachments`
+- 真实工具用例与部署：`real-tool-result.log`、`nas-review-deploy.log`、`review-verification.json`
+- 验证边界：其他模型、真实远端撤销、额度耗尽、加密推理条目回放与本版真机媒体播放未全部实测。
