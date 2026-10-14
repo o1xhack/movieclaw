@@ -8,6 +8,7 @@ from movieclaw_api.schemas.base import BaseModel
 from movieclaw_api.schemas.llm import (
     LlmDefaultsPayload,
     LlmDefaultsView,
+    LlmModelDiscoveryPayload,
     LlmModelOptionView,
     LlmPresetView,
     LlmProviderPayload,
@@ -74,6 +75,20 @@ async def finish_chatgpt(
     row = await service.start_verification(row.id)
     background_tasks.add_task(verify_llm_provider, row.id)
     return ok(LlmProviderView.from_model(row), message="ChatGPT 已连接，正在验证模型")
+
+
+@router.post(
+    "/models/discover",
+    response_model=ApiResponse[list[str]],
+    summary="查询端点上报的模型 ID（不保存配置）",
+    operation_id="llm.models.discover",
+)
+async def discover_llm_models(
+    payload: LlmModelDiscoveryPayload,
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[list[str]]:
+    models = await LlmConfigService(session).discover_models(payload)
+    return ok(models)
 
 
 @router.get(

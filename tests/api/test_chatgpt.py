@@ -364,7 +364,6 @@ def test_rejected_grants_keep_specific_error_and_are_revoked(client, monkeypatch
     assert "new-grant-access" not in result.text and "new-grant-refresh" not in result.text
 
 
-@pytest.mark.skip(reason="Private v0.37 does not expose models/discover")
 def test_discovery_persists_refresh_rotation_after_instance_rename(client, monkeypatch):
     from tests.llm.unit.test_chatgpt import credentials
 
