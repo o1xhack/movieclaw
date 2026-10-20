@@ -160,7 +160,7 @@ Luca Cinema 0.8.0（9）Archive 成功。主 App 和两个扩展版本一致，�
 - 从本地 0.38.0 功能镜像升级到官方 `movieclaw/movieclaw:v0.41.0`，运行时 23；仅保留既有的无投递台账外部下载任务隐藏补丁，派生镜像为 `local/movieclaw:v0.41.0-luca-external-20261020`。补丁只修改任务中心可见性，不改变 qB 下载、做种或文件。
 - 官方基础镜像 digest：`sha256:55a558d42451a221e1df9d9226ac75cf9f54db1f3dc71c4c278ee14f9939c58f`。
 - 升级前先做在线 SQLite 备份，在断网隔离容器中完成副本迁移、凭据解密和模型能力检查。随后正常停止 MovieClaw，对整个 data 目录做独立备份，完整性检查为 `ok`，再仅重建 MovieClaw。
-- 完整数据和 compose 备份仅在 NAS `/volume1/docker/movieclaw/upgrade041-20261020/backup`；在线数据库和隔离副本在 NAS `/volume1/docker/movieclaw/data/manual-backups/upgrade041-20261020`。敏感备份目录为 0700，数据库/密钥为 0600，不进入 Git。
+- 完整数据和 compose 备份仅在 NAS `/volume1/docker/movieclaw/upgrade041-20261020/backup`；在线数据库和隔离副本在 NAS `/volume1/docker/movieclaw/data/manual-backups/upgrade041-20261020`。敏感备份目录为 0700；在线预备数据库和隔离密钥为 0600，完整目录副本保留原文件模式，不进入 Git。
 - 生产版本 0.41.0、迁移头 `c5f1a8e3d9b2`、SQLite `quick_check=ok`，容器 healthy、重启次数 0。2 个库、6500 个库文件、466 个媒体条目、2 个供应商前后数量一致，已有供应商凭据解密成功。
 - 已认证 API 返回 11 个模型，GPT-6.1-sol 保留 low / medium / high / xhigh / max。下载任务中心返回 81 个受管任务、0 个 external，下载器 active。qB 容器 ID 与启动时间前后一致，MovieClaw / qB / Plex HTTP 检查均为 200。
 - 本版无转码器协议变更，未更新 Mac 转码器。未重新授权 ChatGPT，未执行消耗额度的模型推理。
