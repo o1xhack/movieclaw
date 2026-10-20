@@ -74,6 +74,43 @@ def test_incomplete_audio_does_not_switch_without_suitable_alternative(reason: s
     assert skip_segments._complete_audio_index(streams, 2700) == 0
 
 
+def _audio_vivid_fixture() -> list[dict]:
+    """NAS 醉梦 E01 的真实 ffprobe 输出：第一轨 Audio Vivid（ffprobe 不给 codec_name）。"""
+    fixtures = Path(__file__).parents[1] / "playback/fixtures/skip_segments"
+    fixture = fixtures / "nas-audio-vivid-first.json"
+    return json.loads(fixture.read_text())["streams"]
+
+
+def test_undecodable_first_audio_selects_decodable_track() -> None:
+    """醉梦 E01～E03：ffmpeg 解不了第一轨 Audio Vivid，改用同语言的第二轨 EAC3。"""
+    streams = _audio_vivid_fixture()
+    assert skip_segments._complete_audio_index(streams, 2819) == 0
+    assert skip_segments._decodable_audio_index(streams, 0, 2819) == 1
+    # 解得了的轨不动
+    assert skip_segments._decodable_audio_index(streams, 3, 2819) == 3
+
+
+@pytest.mark.parametrize("reason", ["all_undecodable", "different_language", "short"])
+def test_undecodable_audio_kept_without_suitable_alternative(reason: str) -> None:
+    streams = _audio_vivid_fixture()
+    for stream in streams[1:]:
+        if reason == "all_undecodable":
+            stream.pop("codec_name")
+        elif reason == "different_language":
+            stream["tags"]["language"] = "eng"
+        else:
+            stream["duration"] = "2700"
+    assert skip_segments._decodable_audio_index(streams, 0, 2819) == 0
+
+
+def test_truehd_never_switches_to_undecodable_track() -> None:
+    streams = [
+        {"codec_name": "truehd", "duration": "2700", "tags": {"language": "chi"}},
+        {"duration": "2700", "tags": {"language": "chi"}},
+    ]
+    assert skip_segments._cheaper_audio_index(streams, 0, 2700) == 0
+
+
 def _truehd_streams() -> list[dict]:
     return [
         {"codec_name": "truehd", "duration": "2700", "tags": {"language": "eng"}},
@@ -2408,3 +2445,24 @@ def test_jellyfin_maps_ad_and_preview_segments(client, tmp_path) -> None:
     guid = episode_guid(ids["show"], 1, 3)
     body = client.get(f"/MediaSegments/{guid}", params={"ApiKey": token}).json()
     assert [i["Type"] for i in body["Items"]] == ["Commercial", "Outro", "Preview"]
+
+
+def test_auto_skip_preferences_follow_account(client, tmp_path) -> None:
+    """自动跳过（§5）：总开关默认开，片头按剧记，随会话下发；只影响记下的那部剧。"""
+    ids = call(client, _seed, tmp_path, 3)
+    episode, film = ids["files"][0], ids["film"]
+    assert start_session(client, episode)["auto_skip"] == {"enabled": True, "intro": False}
+
+    resp = client.put(f"{_PB}/auto-skip/intro/{ids['show']}", json={"enabled": True})
+    assert resp.status_code == 200, resp.text
+    # 记两次也只记一份
+    client.put(f"{_PB}/auto-skip/intro/{ids['show']}", json={"enabled": True})
+    assert start_session(client, ids["files"][1])["auto_skip"] == {"enabled": True, "intro": True}
+    assert start_session(client, film)["auto_skip"]["intro"] is False
+
+    client.put(f"{_PB}/auto-skip", json={"enabled": False})
+    assert start_session(client, episode)["auto_skip"] == {"enabled": False, "intro": True}
+
+    client.put(f"{_PB}/auto-skip/intro/{ids['show']}", json={"enabled": False})
+    client.put(f"{_PB}/auto-skip", json={"enabled": True})
+    assert start_session(client, episode)["auto_skip"] == {"enabled": True, "intro": False}

@@ -208,6 +208,42 @@ export interface PluginNotification {
   default: boolean;
 }
 
+export interface PackageDependency {
+  name: string;
+  version: string;
+  /** 这台服务器要下载的轮子大小（字节）；没有适用的轮子时为空 */
+  size: number | null;
+  /** 含本机代码（不是纯 Python） */
+  native: boolean;
+  /** 有适用于这台服务器平台的轮子 */
+  available: boolean;
+  /** 相比已安装版本：added 新增 / changed 换了版本 / null = 不变 */
+  change: "added" | "changed" | null;
+  previous_version: string | null;
+}
+
+export interface PackageDependencies {
+  /** 锁文件内容哈希：批准时原样交回表示同意这一份依赖 */
+  lock_digest: string;
+  packages: PackageDependency[];
+  total_size: number;
+  native: string[];
+  unavailable: string[];
+  removed: string[];
+  index: string;
+  index_label: string;
+  /** 锁文件与已批准的不同（或首次安装） */
+  needs_consent: boolean;
+}
+
+export interface DependencyProgress {
+  /** installing 正在安装 / failed 安装失败（可重试） */
+  phase: "installing" | "failed";
+  done: number;
+  total: number;
+  error: string | null;
+}
+
 export interface PackageRequest {
   id: string;
   title: string;
@@ -236,6 +272,74 @@ export interface PackageRequest {
   installed_version: string | null;
   /** 与随带的内置插件同 id：安装即替换它，卸载后随带版本回来；旧服务端没有这个字段 */
   replaces_builtin?: boolean;
+  /** 要下载安装的第三方包；没有依赖或旧服务端为空 */
+  dependencies?: PackageDependencies | null;
+  /** 批准后正在安装依赖时的进度 */
+  dependency_progress?: DependencyProgress | null;
+  /** 带网页：侧边栏入口预览（图标是内嵌的 SVG）；批准时须单独同意授信运行。旧服务端没有这个字段 */
+  web?: PendingWebPage | null;
+}
+
+/** 插件网页的一项侧边栏入口（与 lib/plugin-apps.ts 的 PluginAppEntry 同形） */
+export interface WebPageEntry {
+  label: string;
+  path: string;
+  icon: string | null;
+  monochrome: boolean;
+}
+
+export interface PendingWebPage {
+  id: string;
+  name: string;
+  base: string;
+  entries: WebPageEntry[];
+}
+
+/** 一个带网页的插件（插件包或本地插件），不论是否已同意 */
+export interface WebPage {
+  id: string;
+  name: string;
+  /** package：插件包；local：本地插件 */
+  source: string;
+  /** 已同意授信运行；没同意的不托管、不进侧边栏 */
+  approved: boolean;
+  nav: boolean;
+  members: boolean;
+  base: string;
+  entries: WebPageEntry[];
+}
+
+export interface WebConsent {
+  /** 加到侧边栏 */
+  nav: boolean;
+  /** 成员也能看到 */
+  members: boolean;
+}
+
+/** 带网页的插件；旧服务端没有这个接口时返回空列表 */
+export async function listWebPages(): Promise<WebPage[]> {
+  try {
+    return (await request<ApiEnvelope<WebPage[]>>("/app/plugins/pages")).data;
+  } catch {
+    return [];
+  }
+}
+
+/** 同意插件网页授信运行，或改它加不加侧边栏、成员能不能看到（只能由人在网页里操作） */
+export async function setWebConsent(id: string, consent: WebConsent): Promise<WebPage> {
+  return (
+    await request<ApiEnvelope<WebPage>>(`/app/plugins/${encodeURIComponent(id)}/web`, {
+      method: "PUT",
+      body: JSON.stringify(consent),
+    })
+  ).data;
+}
+
+/** 撤销插件网页的同意：不再托管、从侧边栏撤下 */
+export async function revokeWebConsent(id: string): Promise<void> {
+  await request<ApiEnvelope<null>>(`/app/plugins/${encodeURIComponent(id)}/web`, {
+    method: "DELETE",
+  });
 }
 
 export interface InstalledPackage {
@@ -257,6 +361,10 @@ export interface InstalledPackage {
   watching: boolean;
   /** 替换了随带的内置插件；旧服务端没有这个字段 */
   replaces_builtin?: boolean;
+  /** 批准安装的第三方依赖；progress 在安装中或安装失败时才有 */
+  dependencies?: { packages: string[]; progress: DependencyProgress | null } | null;
+  /** 插件网页的同意；不带网页、没同意或旧服务端为空 */
+  web?: WebConsent | null;
 }
 
 export interface PackagesOverview {
@@ -288,11 +396,13 @@ export async function uploadPackage(file: File): Promise<PackageRequest> {
 }
 
 /** 批准：宿主操作与路径须与插件申请的完全一致（显式同意），进程内运行须 allowInline，
- * 会给普通成员发通知的须 allowMemberNotifications */
+ * 会给普通成员发通知的须 allowMemberNotifications，带网页的须给 web（同意授信运行）；
+ * 批准页列出了依赖，批准即同意那一份锁文件 */
 export async function approvePackage(
   pending: PackageRequest,
   allowInline: boolean,
   allowMemberNotifications = false,
+  web: WebConsent | null = null,
 ): Promise<PackageResult> {
   return (
     await request<ApiEnvelope<PackageResult>>(
@@ -305,6 +415,8 @@ export async function approvePackage(
           paths: pending.paths,
           allow_inline: allowInline,
           allow_member_notifications: allowMemberNotifications,
+          dependencies: pending.dependencies?.lock_digest ?? null,
+          ...(web ? { allow_web: true, web_nav: web.nav, web_members: web.members } : {}),
         }),
       },
     )
@@ -322,6 +434,16 @@ export async function rollbackPackage(id: string): Promise<PackageResult> {
   return (
     await request<ApiEnvelope<PackageResult>>(
       `/app/plugins/packages/${encodeURIComponent(id)}/rollback`,
+      { method: "POST" },
+    )
+  ).data;
+}
+
+/** 依赖没装好（启动时补装失败）：按已批准的锁文件再装一次，装好即加载 */
+export async function retryPackageDependencies(id: string): Promise<PackageResult> {
+  return (
+    await request<ApiEnvelope<PackageResult>>(
+      `/app/plugins/packages/${encodeURIComponent(id)}/dependencies/retry`,
       { method: "POST" },
     )
   ).data;

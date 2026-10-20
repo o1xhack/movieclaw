@@ -542,6 +542,12 @@ _MEMBER_ALLOWLIST = {
     # 界面偏好（同上，P2 per-member 化）
     ("GET", "/api/v1/ui/preferences"),
     ("PUT", "/api/v1/ui/preferences"),
+    # 插件网页（docs/design/plugin-web-pages.md）：列表与托管只给管理员同意过「成员也能看到」
+    # 的页面，其余对成员一律当作不存在（404）
+    ("GET", "/api/v1/ui/apps"),
+    ("POST", "/api/v1/ui/apps/{entry_id}/errors"),
+    ("GET", "/api/v1/plugins/{entry_id}/web"),
+    ("GET", "/api/v1/plugins/{entry_id}/web/{path}"),
     # 发现页 / 详情 / 演职员 / 图片：纯浏览面
     ("GET", "/api/v1/ui/discovery/{media_type}"),
     ("GET", "/api/v1/discover/collections"),
@@ -620,6 +626,9 @@ _MEMBER_ALLOWLIST = {
     # 清除观看记录只作用于当前成员自己的行（超管删超管的），跨成员不提供；
     # 按条目/按库清除还要求目标在可浏览范围内（docs/design/library-access.md 2.6）
     ("DELETE", "/api/v1/playback/history"),
+    # 自动跳过偏好（skip-intro.md §5）：按 owner_id 只改自己那一行，跟账号走的个人设置
+    ("PUT", "/api/v1/playback/auto-skip"),
+    ("PUT", "/api/v1/playback/auto-skip/intro/{media_item_id}"),
     # 播放页条目信息/分集清单：按可见库解析归属，不可见与不存在同样 404
     ("GET", "/api/v1/playback/items/{media_item_id}"),
     ("GET", "/api/v1/playback/items/{media_item_id}/episodes"),
@@ -646,6 +655,9 @@ _MEMBER_ALLOWLIST = {
     # 原盘目录直推（disc-direct-play.md）：只凭签名 token，与原文件直出同属公开取流区
     ("GET", "/api/v1/playback/files/{file_id}/disc"),
     ("GET", "/api/v1/playback/files/{file_id}/disc/{relative_path}"),
+    # 蓝光剪辑清单（disc-clip-play.md）：同属公开取流区，只凭签名 token
+    ("GET", "/api/v1/playback/files/{file_id}/bluray"),
+    ("GET", "/api/v1/playback/files/{file_id}/bluray/{index}"),
     ("GET", "/api/v1/playback/files/{file_id}/subtitles"),
     # 预切片段（reels.md §8）：同原文件直出，只凭签名 token（按文件签发）
     ("GET", "/api/v1/reels/clips/{file_id}/{start_ms}.mp4"),
@@ -739,10 +751,14 @@ _MEMBER_ALLOWLIST = {
     ("DELETE", "/api/v1/offline/exports/{export_id}"),
     # 本机播放的观看记录：只写自己的观看状态与日志（同 /playback/progress）
     ("POST", "/api/v1/playback/viewings"),
+    # App 自身更新的服务器兜底：只读公开的发布信息、代下公开的安装包
+    ("GET", "/api/v1/app/clients/{product}/latest"),
+    ("GET", "/api/v1/app/clients/{product}/apk"),
 }
 
 # 路径参数哑值（与 test_auth.py 的匿名守护测试保持一致）
 _PATH_DUMMIES = {
+    "{product}": "x",  # 客户端更新：不存在的客户端名（422，不联网）
     "{letter_id}": "1",  # 可靠事件死信
     "{start_ms}": "0",  # 预切片段的起点
     "{task_key}": "library_reconcile",
@@ -791,6 +807,7 @@ _PATH_DUMMIES = {
     "{channel}": "weixin",
     "{channel_id}": "weixin",
     "{binding_id}": "test-binding",
+    "{login_id}": "test-login",
     "{endpoint_id}": "test-endpoint",
     "{member_id}": "1",
     "{job_id}": "job_test",

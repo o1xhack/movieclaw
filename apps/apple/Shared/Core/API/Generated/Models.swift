@@ -235,6 +235,56 @@ nonisolated extension API {
         }
     }
 
+    struct AppEntry: Codable, Hashable, Sendable {
+        /// 侧边栏文字（manifest 的 short_name / name）
+        var label: String
+        /// 落点：相对插件网页根目录的子路径，主入口通常为空
+        var path: String
+        /// 图标地址；没有则用默认图标
+        var icon: String?
+        /// manifest 标了 purpose: monochrome：按遮罩用当前文字颜色着色
+        var monochrome: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case label
+            case path
+            case icon
+            case monochrome
+        }
+    }
+
+    struct AppErrorReport: Codable, Hashable, Sendable {
+        /// 报错信息（error.message）
+        var message: String
+        /// 出处与调用栈
+        var detail: String?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case detail
+        }
+    }
+
+    struct AppView: Codable, Hashable, Sendable {
+        /// 插件 id；主程序地址是 /apps/<id>/
+        var id: String
+        var name: String
+        /// 用户同意加到侧边栏
+        var nav: Bool
+        /// iframe 加载的地址前缀
+        var base: String
+        /// 侧边栏项：主入口在前，manifest shortcuts 依次在后
+        var entries: [API.AppEntry]
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case nav
+            case base
+            case entries
+        }
+    }
+
     /// 外观设置的对外视图。
     /// 背景图是按账号隔离的「图库」：用户上传的图全部保留（``backdrops``，按上传
     /// 时间升序），其中至多一张为当前生效图（``active_id`` / ``active_url``）。
@@ -1117,9 +1167,11 @@ nonisolated extension API {
         var universal: Bool?
         var discImage: Bool?
         var discFolder: Bool?
+        var blurayClips: Bool?
         var localTracks: Bool?
         var dolbyVisionProfiles: [Int]?
         var dolbyVisionBaseLayerProfiles: [Int]?
+        var dolbyVisionRecordAudit: Bool?
 
         enum CodingKeys: String, CodingKey {
             case video
@@ -1132,9 +1184,49 @@ nonisolated extension API {
             case universal
             case discImage = "disc_image"
             case discFolder = "disc_folder"
+            case blurayClips = "bluray_clips"
             case localTracks = "local_tracks"
             case dolbyVisionProfiles = "dolby_vision_profiles"
             case dolbyVisionBaseLayerProfiles = "dolby_vision_base_layer_profiles"
+            case dolbyVisionRecordAudit = "dolby_vision_record_audit"
+        }
+    }
+
+    /// Android 手机 / 电视客户端的最新正式版（GitHub Release 附带的包信息 JSON）。
+    /// App 拿 ``build`` 与自己的 versionCode 比较；下载走 ``/app/clients/{product}/apk``，
+    /// 由服务器经「设置 → 网络」里的 GitHub 出口代取（电视、手机常常直连不了 GitHub）。
+    struct ClientReleaseView: Codable, Hashable, Sendable {
+        /// android / androidtv
+        var product: String
+        /// versionName，如 0.4.0
+        var version: String
+        /// versionCode：App 比这个数决定有没有新版
+        var build: Int
+        /// APK 字节数
+        var size: Int
+        /// APK 的 sha256（小写十六进制），下载完 App 自己核对
+        var sha256: String
+        /// 签名证书指纹：与本机安装包不同时覆盖安装会失败
+        var certificateSha256: String?
+        /// 最低 Android API 级别
+        var minimumSdk: Int?
+        /// Release 正文（Markdown）
+        var changelog: String
+        var publishedAt: String?
+        /// GitHub Release 页面
+        var releaseUrl: String
+
+        enum CodingKeys: String, CodingKey {
+            case product
+            case version
+            case build
+            case size
+            case sha256
+            case certificateSha256 = "certificate_sha256"
+            case minimumSdk = "minimum_sdk"
+            case changelog
+            case publishedAt = "published_at"
+            case releaseUrl = "release_url"
         }
     }
 
@@ -1182,6 +1274,87 @@ nonisolated extension API {
             case reason
             case message
             case at
+        }
+    }
+
+    /// 库的一个网盘根目录（docs/design/cloud-storage.md §3.2）。
+    struct CloudFolderPayload: Codable, Hashable, Sendable {
+        /// 网盘账号 id
+        var accountId: Int
+        /// 网盘目录 id（目录选择器给的）
+        var remoteDirId: String
+        /// 网盘上的路径，如「影视/电影」（展示用）
+        var displayPath: String
+        /// 主根在这个网盘目录：新内容落在这里（上传后本地腾空），此时 root_paths 的第一项是本地暂存目录。每库至多一个
+        var isPrimary: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case accountId = "account_id"
+            case remoteDirId = "remote_dir_id"
+            case displayPath = "display_path"
+            case isPrimary = "is_primary"
+        }
+    }
+
+    /// 最近一次纳管 / 复查这个网盘目录的结果。
+    struct CloudFolderReportView: Codable, Hashable, Sendable {
+        var finishedAt: String
+        /// 用时（秒）
+        var seconds: Double
+        /// 调用网盘接口的次数
+        var calls: Int
+        /// 视频文件数
+        var videos: Int
+        /// 已识别
+        var identified: Int
+        /// 待认领（没认出来的）
+        var pending: Int
+        /// 跳过的：disc=原盘目录、iso=光盘镜像、extra=样片与花絮（一期不纳管）
+        var skipped: [String: Int]
+        /// 扫描中途停止了（数字不完整）
+        var cancelled: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case finishedAt = "finished_at"
+            case seconds
+            case calls
+            case videos
+            case identified
+            case pending
+            case skipped
+            case cancelled
+        }
+    }
+
+    struct CloudFolderView: Codable, Hashable, Sendable {
+        var id: Int
+        var accountId: Int
+        var accountName: String
+        /// 网盘类型
+        var backend: String
+        /// 网盘名；插件不在时就是类型值
+        var backendTitle: String
+        var remoteDirId: String
+        var displayPath: String
+        var isPrimary: Bool
+        /// 台账里在位的纳管文件数
+        var fileCount: Int
+        /// 上次纳管或复查的时间；没列过为 null
+        var listedAt: String?
+        var report: API.CloudFolderReportView?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case accountId = "account_id"
+            case accountName = "account_name"
+            case backend
+            case backendTitle = "backend_title"
+            case remoteDirId = "remote_dir_id"
+            case displayPath = "display_path"
+            case isPrimary = "is_primary"
+            case fileCount = "file_count"
+            case listedAt = "listed_at"
+            case report
         }
     }
 
@@ -1272,6 +1445,36 @@ nonisolated extension API {
             case lastReport = "last_report"
             case lastReportAt = "last_report_at"
             case notices
+        }
+    }
+
+    /// 主根在网盘的库正在往网盘传的进度（docs/design/cloud-storage.md §5）。
+    struct CloudUploadView: Codable, Hashable, Sendable {
+        var jobId: String
+        /// 任务状态：queued / running / retry_wait / blocked …
+        var status: String
+        /// 已传完的文件数
+        var processed: Int
+        /// 这一轮要传的文件数（含已传完的）
+        var total: Int
+        /// 其中秒传的个数
+        var rapid: Int
+        /// 没传成的个数
+        var failed: Int
+        /// 当前文件的进度（%）
+        var percent: Double?
+        /// 当前在做什么（一句话）
+        var message: String
+
+        enum CodingKeys: String, CodingKey {
+            case jobId = "job_id"
+            case status
+            case processed
+            case total
+            case rapid
+            case failed
+            case percent
+            case message
         }
     }
 
@@ -1645,6 +1848,25 @@ nonisolated extension API {
         }
     }
 
+    /// 这次删除会删掉的网盘文件（cloud-storage.md §10）。
+    struct DeleteCloudView: Codable, Hashable, Sendable {
+        /// 网盘名（多个网盘时用顿号连起来）
+        var backendTitle: String
+        /// 要删的网盘文件数
+        var files: Int
+        /// 这些文件的大小
+        var bytes: Int
+        /// 网盘有回收站：删的是进网盘回收站，还能在网盘里还原
+        var recycleBin: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case backendTitle = "backend_title"
+            case files
+            case bytes
+            case recycleBin = "recycle_bin"
+        }
+    }
+
     /// 一个勾选的删除选项建出的后续任务（docs/design/library-boundary.md §3.4）。
     struct DeleteFollowUpView: Codable, Hashable, Sendable {
         /// 删除选项的键，如 downloads:remove-source
@@ -1713,6 +1935,48 @@ nonisolated extension API {
             case attempts
             case error
             case at
+        }
+    }
+
+    struct DependencyProgressView: Codable, Hashable, Sendable {
+        /// installing 正在安装依赖 / failed 安装失败（可重试）
+        var phase: String
+        /// 已下载好的包数
+        var done: Int
+        var total: Int
+        /// 失败原因
+        var error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case phase
+            case done
+            case total
+            case error
+        }
+    }
+
+    struct DependencyView: Codable, Hashable, Sendable {
+        var name: String
+        var version: String
+        /// 这台服务器要下载的轮子大小（字节）；没有适用的轮子时为空
+        var size: Int?
+        /// 含本机代码（不是纯 Python）：更难审查，单独标出
+        var native: Bool
+        /// 有适用于这台服务器平台的轮子；没有则安装会失败
+        var available: Bool
+        /// 相比已安装版本：added 新增 / changed 换版本 / 空 不变
+        var change: String?
+        /// 已安装版本里的版本
+        var previousVersion: String?
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case version
+            case size
+            case native
+            case available
+            case change
+            case previousVersion = "previous_version"
         }
     }
 
@@ -2936,6 +3200,315 @@ nonisolated extension API {
         }
     }
 
+    struct DriveAccountUpdatePayload: Codable, Hashable, Sendable {
+        var name: String?
+        var qps: Double?
+        var dailyBudget: Int?
+        var readSlots: Int?
+        /// 回到插件默认值的字段：qps / daily_budget / read_slots
+        var reset: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case qps
+            case dailyBudget = "daily_budget"
+            case readSlots = "read_slots"
+            case reset
+        }
+    }
+
+    struct DriveAccountView: Codable, Hashable, Sendable {
+        var id: Int
+        /// 网盘类型
+        var backend: String
+        /// 网盘名；插件不在时就是类型值
+        var backendTitle: String
+        /// 提供这种网盘的插件在运行
+        var backendAvailable: Bool
+        var accentColor: String
+        var name: String
+        /// scan / cookie / form
+        var loginMethod: String
+        /// 登录细节（如扫码选的登录端）
+        var loginDetail: String?
+        /// ok / auth_expired / rate_limited / api_broken / disabled
+        var status: String
+        var statusMessage: String?
+        /// 限流的恢复时间
+        var statusUntil: String?
+        /// 生效的请求速率（次 / 秒）
+        var qps: Double
+        /// 生效的每日调用预算
+        var dailyBudget: Int
+        /// 生效的同时播放数
+        var readSlots: Int
+        /// 请求速率是用户改过的
+        var qpsCustom: Bool
+        var dailyBudgetCustom: Bool
+        var readSlotsCustom: Bool
+        /// 今天已用的调用次数
+        var usedToday: Int
+        var vip: String?
+        var quotaTotal: Int?
+        var quotaUsed: Int?
+        var profileAt: String?
+        var createdAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case backend
+            case backendTitle = "backend_title"
+            case backendAvailable = "backend_available"
+            case accentColor = "accent_color"
+            case name
+            case loginMethod = "login_method"
+            case loginDetail = "login_detail"
+            case status
+            case statusMessage = "status_message"
+            case statusUntil = "status_until"
+            case qps
+            case dailyBudget = "daily_budget"
+            case readSlots = "read_slots"
+            case qpsCustom = "qps_custom"
+            case dailyBudgetCustom = "daily_budget_custom"
+            case readSlotsCustom = "read_slots_custom"
+            case usedToday = "used_today"
+            case vip
+            case quotaTotal = "quota_total"
+            case quotaUsed = "quota_used"
+            case profileAt = "profile_at"
+            case createdAt = "created_at"
+        }
+    }
+
+    /// 一种可用的网盘（有插件提供后端）。
+    struct DriveBackendView: Codable, Hashable, Sendable {
+        var type: String
+        var title: String
+        var description: String
+        /// 图标主题色；空 = 用默认色
+        var accentColor: String
+        var capabilities: API.DriveCapabilitiesView
+        var login: API.DriveLoginSpecView
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case title
+            case description
+            case accentColor = "accent_color"
+            case capabilities
+            case login
+        }
+    }
+
+    struct DriveCapabilitiesView: Codable, Hashable, Sendable {
+        /// 能写（上传、移动、删除）
+        var writable: Bool
+        /// 秒传用的指纹；空 = 不支持秒传
+        var rapidUploadHashes: [String]
+        var rangeChallenge: Bool
+        /// 列目录时带文件哈希
+        var listHashes: Bool
+        /// 有操作动态（增量感知网盘上的变化）
+        var changeFeed: Bool
+        /// 直链是原画
+        var originalLink: Bool
+        var linkNeedsUa: Bool
+        /// 删除进网盘回收站
+        var recycleBin: Bool
+        var defaultQps: Double
+        var defaultDailyBudget: Int
+        var defaultReadSlots: Int
+
+        enum CodingKeys: String, CodingKey {
+            case writable
+            case rapidUploadHashes = "rapid_upload_hashes"
+            case rangeChallenge = "range_challenge"
+            case listHashes = "list_hashes"
+            case changeFeed = "change_feed"
+            case originalLink = "original_link"
+            case linkNeedsUa = "link_needs_ua"
+            case recycleBin = "recycle_bin"
+            case defaultQps = "default_qps"
+            case defaultDailyBudget = "default_daily_budget"
+            case defaultReadSlots = "default_read_slots"
+        }
+    }
+
+    struct DriveCookiePayload: Codable, Hashable, Sendable {
+        var backend: String
+        /// 整页 Cookie（name=value; name2=value2）
+        var cookie: String
+        /// 从这个账号的卡片上重新登录：登进来的必须是同一个网盘用户
+        var relogin: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case backend
+            case cookie
+            case relogin
+        }
+    }
+
+    /// 目录选择器里的一个子目录。
+    struct DriveDirView: Codable, Hashable, Sendable {
+        /// 网盘目录 id
+        var id: String
+        var name: String
+        /// 网盘上的完整路径（展示用，如「影视/电影」）
+        var path: String
+        /// 底下还有没有子目录；不知道为 null
+        var hasChildren: Bool?
+        /// 视频文件数（网盘目录信息直接给的）；不知道为 null
+        var videoCount: Int?
+        /// 这个目录（或它的上层、下层）已经挂在哪个媒体库上
+        var libraryId: Int?
+        var libraryName: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case path
+            case hasChildren = "has_children"
+            case videoCount = "video_count"
+            case libraryId = "library_id"
+            case libraryName = "library_name"
+        }
+    }
+
+    struct DriveFormLoginPayload: Codable, Hashable, Sendable {
+        var backend: String
+        /// 按后端声明的 login.form 填的值
+        var values: [String: API.JSONValue]
+        /// 从这个账号的卡片上重新登录：登进来的必须是同一个网盘用户
+        var relogin: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case backend
+            case values
+            case relogin
+        }
+    }
+
+    struct DriveLoginChoiceView: Codable, Hashable, Sendable {
+        var value: String
+        var label: String
+        var help: String
+
+        enum CodingKeys: String, CodingKey {
+            case value
+            case label
+            case help
+        }
+    }
+
+    struct DriveLoginOptionView: Codable, Hashable, Sendable {
+        var key: String
+        var label: String
+        var `default`: String
+        var help: String
+        var choices: [API.DriveLoginChoiceView]
+
+        enum CodingKeys: String, CodingKey {
+            case key
+            case label
+            case `default`
+            case help
+            case choices
+        }
+    }
+
+    struct DriveLoginPayload: Codable, Hashable, Sendable {
+        var backend: String
+        /// 扫码前选的项
+        var options: [String: String]?
+        /// 从这个账号的卡片上重新登录：登进来的必须是同一个网盘用户
+        var relogin: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case backend
+            case options
+            case relogin
+        }
+    }
+
+    struct DriveLoginSpecView: Codable, Hashable, Sendable {
+        /// 支持扫码登录
+        var scan: Bool
+        /// 支持用浏览器扩展导入或粘贴 Cookie 登录
+        var cookie: Bool
+        var cookieDomains: [String]
+        /// 填表登录的字段（JSON Schema 子集，同插件设置）；null = 不支持填表登录
+        var form: [String: API.JSONValue]?
+        /// 扫码前要选的项（如登录端）
+        var options: [API.DriveLoginOptionView]
+        var hint: String
+
+        enum CodingKeys: String, CodingKey {
+            case scan
+            case cookie
+            case cookieDomains = "cookie_domains"
+            case form
+            case options
+            case hint
+        }
+    }
+
+    struct DriveLoginView: Codable, Hashable, Sendable {
+        var loginId: String
+        var backend: String
+        /// pending / scanned / confirmed / expired / failed
+        var status: String
+        var message: String
+        /// 二维码图片（data URL）；没有为空
+        var qrImage: String
+        /// confirmed 时的账号
+        var account: API.DriveAccountView?
+        /// confirmed 时：是新账号（否则是重新登录了已有账号）
+        var created: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case loginId = "login_id"
+            case backend
+            case status
+            case message
+            case qrImage = "qr_image"
+            case account
+            case created
+        }
+    }
+
+    struct DriveSettingsPayload: Codable, Hashable, Sendable {
+        /// 不传表示不改动
+        var removeDownloadTasks: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case removeDownloadTasks = "remove_download_tasks"
+        }
+    }
+
+    /// 网盘的全局选项。
+    struct DriveSettingsView: Codable, Hashable, Sendable {
+        /// 本地腾空后删除对应的下载任务（H&R、非 MovieClaw 投递的种子保留）
+        var removeDownloadTasks: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case removeDownloadTasks = "remove_download_tasks"
+        }
+    }
+
+    /// 网盘功能醒没醒着（cloud-storage.md §11.8）：各端据此决定网盘入口出不出现，一次请求问完。
+    struct DriveStatusView: Codable, Hashable, Sendable {
+        /// 有插件提供网盘后端；没有时网盘功能整体休眠
+        var active: Bool
+        /// 网盘账号数（插件卸载后账号还在，设置页要能看到并提示装插件）
+        var accounts: Int
+
+        enum CodingKeys: String, CodingKey {
+            case active
+            case accounts
+        }
+    }
+
     /// 一个多文件单元里的一个文件。
     struct DuplicateFileView: Codable, Hashable, Sendable {
         var id: Int
@@ -3618,6 +4191,33 @@ nonisolated extension API {
         enum CodingKeys: String, CodingKey {
             case webhookUrl = "webhook_url"
             case secret
+        }
+    }
+
+    /// 文件在网盘上的副本（cloud-storage.md §3.5）：文件区据此标「本地」「本地 + 115」「115」。
+    struct FileCloudView: Codable, Hashable, Sendable {
+        /// 网盘名
+        var backendTitle: String
+        var accountName: String
+        /// 网盘上的路径（展示用；成员端为 null）
+        var remotePath: String?
+        /// 本地也有字节
+        var local: Bool
+        /// imported（纳管来的）/ uploaded（我们传的）
+        var origin: String
+        /// uploading / verified / lost / deleting / failed
+        var state: String
+        /// 上次上传没成的原因
+        var error: String?
+
+        enum CodingKeys: String, CodingKey {
+            case backendTitle = "backend_title"
+            case accountName = "account_name"
+            case remotePath = "remote_path"
+            case local
+            case origin
+            case state
+            case error
         }
     }
 
@@ -4351,6 +4951,18 @@ nonisolated extension API {
         }
     }
 
+    struct InstalledDependenciesView: Codable, Hashable, Sendable {
+        /// 批准安装的第三方包（名字 版本）
+        var packages: [String]
+        /// 依赖正在安装或安装失败时的进度；就绪时为空
+        var progress: API.DependencyProgressView?
+
+        enum CodingKeys: String, CodingKey {
+            case packages
+            case progress
+        }
+    }
+
     struct InstalledPackageView: Codable, Hashable, Sendable {
         var id: String
         var title: String
@@ -4370,6 +4982,10 @@ nonisolated extension API {
         var watching: Bool
         /// 替换了随带的内置插件；卸载后随带版本回来
         var replacesBuiltin: Bool
+        /// 批准安装的第三方依赖；没有则为空
+        var dependencies: API.InstalledDependenciesView?
+        /// 插件网页的同意；不带网页或没同意为空
+        var web: API.WebConsentView?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -4386,6 +5002,8 @@ nonisolated extension API {
             case error
             case watching
             case replacesBuiltin = "replaces_builtin"
+            case dependencies
+            case web
         }
     }
 
@@ -4420,12 +5038,15 @@ nonisolated extension API {
         /// 要删的文件里与别处是同一份数据（硬链接）的字节数：只删库文件不会释放这部分空间
         var linkedBytes: Int
         var options: [API.DeleteOptionView]
+        /// 也会删掉网盘上的文件；只在本地的为 null
+        var cloud: API.DeleteCloudView?
 
         enum CodingKeys: String, CodingKey {
             case wholeItem = "whole_item"
             case plan
             case linkedBytes = "linked_bytes"
             case options
+            case cloud
         }
     }
 
@@ -4940,6 +5561,8 @@ nonisolated extension API {
         var playbackDefaults: API.TrackDefaultsView?
         /// 有效章节列表（内嵌或按时长合成）；null=所在库未开启「生成章节」或尚未探测
         var chapters: [API.ChapterView]?
+        /// 网盘上的副本；null = 只在本地（没有网盘副本）
+        var cloud: API.FileCloudView?
         var addedAt: String
 
         enum CodingKeys: String, CodingKey {
@@ -4972,6 +5595,7 @@ nonisolated extension API {
             case subtitleStreams = "subtitle_streams"
             case playbackDefaults = "playback_defaults"
             case chapters
+            case cloud
             case addedAt = "added_at"
         }
     }
@@ -5333,6 +5957,10 @@ nonisolated extension API {
         var scrapeOverrides: [String: API.JSONValue]?
         /// 是否启用实时文件监控（关闭后该库不建 watchdog 监听，靠定期对账与手动扫描发现新文件——SMB/NFS 网络挂载建议关闭）；不传表示不改动，新建时默认开启
         var realtimeWatch: Bool?
+        /// 主根在网盘时本地也保留一份（两边都留、当备份，上传后不腾空本地）；不传表示不改动，新建时默认关闭
+        var keepLocal: Bool?
+        /// 网盘根目录（整体覆盖式）：挂上即纳管——目录里已有的视频按文件名识别入库，不下载、不改动网盘上的文件；拿掉只删台账，不动网盘。不传表示不改动
+        var cloudFolders: [API.CloudFolderPayload]?
 
         enum CodingKeys: String, CodingKey {
             case name
@@ -5351,6 +5979,8 @@ nonisolated extension API {
             case autoClearMissing = "auto_clear_missing"
             case scrapeOverrides = "scrape_overrides"
             case realtimeWatch = "realtime_watch"
+            case keepLocal = "keep_local"
+            case cloudFolders = "cloud_folders"
         }
     }
 
@@ -5593,6 +6223,8 @@ nonisolated extension API {
         var autoClearMissing: Bool
         /// 是否启用实时文件监控
         var realtimeWatch: Bool
+        /// 主根在网盘时本地也保留一份（上传后不腾空本地）
+        var keepLocal: Bool?
         /// 任一根路径落在网络挂载（NFS/SMB/fuse）上。这种库实时监控收不到远端变更，新文件靠定期对账发现——界面据此把话说清楚，而不是让开关看起来有效
         var networkMount: Bool
         /// 封面是用户上传的自定义图（而非自动拼贴）。前端据此决定「恢复自动拼贴」按钮的形态，以及空库要不要照样出图
@@ -5616,6 +6248,10 @@ nonisolated extension API {
         var metadataRefresh: API.MetadataRefreshView?
         /// 整库生成章节的作业状态（排队/进行中）；没在生成为 null
         var chapterJob: API.ChapterJobView?
+        /// 正在上传到网盘的进度；没在传为 null
+        var cloudUpload: API.CloudUploadView?
+        /// 网盘根目录（管理员端恒为数组，成员端为 null）；有主根在网盘的，root_paths 第一项是本地暂存目录
+        var cloudFolders: [API.CloudFolderView]?
         var createdAt: String
         var updatedAt: String
 
@@ -5640,6 +6276,7 @@ nonisolated extension API {
             case matchRules = "match_rules"
             case autoClearMissing = "auto_clear_missing"
             case realtimeWatch = "realtime_watch"
+            case keepLocal = "keep_local"
             case networkMount = "network_mount"
             case customCover = "custom_cover"
             case scrapeOverrides = "scrape_overrides"
@@ -5652,6 +6289,8 @@ nonisolated extension API {
             case lastOrganize = "last_organize"
             case metadataRefresh = "metadata_refresh"
             case chapterJob = "chapter_job"
+            case cloudUpload = "cloud_upload"
+            case cloudFolders = "cloud_folders"
             case createdAt = "created_at"
             case updatedAt = "updated_at"
         }
@@ -6877,13 +7516,16 @@ nonisolated extension API {
     /// - 版本升级新增的导航入口，在存过排序的老用户那里也一定会出现（追加在后），
     /// 不会因为不在这个列表里而永远消失——这是这类"存死一份顺序"功能最常见的事故；
     /// - 已经不存在的 id（导航项被删）读取时直接忽略，无需迁移。
-    /// 上限 32 只是防脏数据无限增长的安全阀，不是产品限制（主导航实际只有个位数项）。
+    /// 上限 64 只是防脏数据无限增长的安全阀，不是产品限制（内置项个位数，另加插件网页的项）。
     struct NavUiPrefs: Codable, Hashable, Sendable {
         /// 侧栏主导航的展示顺序（导航项 id）；空列表 = 用内置默认顺序
         var order: [String]
+        /// 从侧栏移出的导航项 id（只有插件网页的项能移出，docs/design/plugin-web-pages.md §4.2）；空 = 都显示
+        var hidden: [String]?
 
         enum CodingKeys: String, CodingKey {
             case order
+            case hidden
         }
     }
 
@@ -6896,13 +7538,16 @@ nonisolated extension API {
     /// - 版本升级新增的导航入口，在存过排序的老用户那里也一定会出现（追加在后），
     /// 不会因为不在这个列表里而永远消失——这是这类"存死一份顺序"功能最常见的事故；
     /// - 已经不存在的 id（导航项被删）读取时直接忽略，无需迁移。
-    /// 上限 32 只是防脏数据无限增长的安全阀，不是产品限制（主导航实际只有个位数项）。
+    /// 上限 64 只是防脏数据无限增长的安全阀，不是产品限制（内置项个位数，另加插件网页的项）。
     struct NavUiPrefsInput: Codable, Hashable, Sendable {
         /// 侧栏主导航的展示顺序（导航项 id）；空列表 = 用内置默认顺序
         var order: [String]?
+        /// 从侧栏移出的导航项 id（只有插件网页的项能移出，docs/design/plugin-web-pages.md §4.2）；空 = 都显示
+        var hidden: [String]?
 
         enum CodingKeys: String, CodingKey {
             case order
+            case hidden
         }
     }
 
@@ -6922,6 +7567,8 @@ nonisolated extension API {
         var tmdbImageBaseUrl: String?
         /// 豆瓣接口镜像地址；留空用默认
         var doubanApiBaseUrl: String?
+        /// 插件依赖的包索引地址（如清华镜像 https://pypi.tuna.tsinghua.edu.cn/simple）；空串 = PyPI 官方；不传 = 保持不变
+        var pypiIndexUrl: String?
 
         enum CodingKeys: String, CodingKey {
             case proxyMode = "proxy_mode"
@@ -6930,6 +7577,7 @@ nonisolated extension API {
             case tmdbApiBaseUrl = "tmdb_api_base_url"
             case tmdbImageBaseUrl = "tmdb_image_base_url"
             case doubanApiBaseUrl = "douban_api_base_url"
+            case pypiIndexUrl = "pypi_index_url"
         }
     }
 
@@ -6947,9 +7595,13 @@ nonisolated extension API {
         var tmdbImageBaseUrl: String
         /// 豆瓣接口镜像地址；留空用默认
         var doubanApiBaseUrl: String
+        /// 插件依赖的包索引地址（如清华镜像 https://pypi.tuna.tsinghua.edu.cn/simple）；空串 = PyPI 官方；不传 = 保持不变
+        var pypiIndexUrl: String?
         var services: [API.EgressServiceOption]
-        /// 三个镜像地址的生效默认值（设置为空时的回落）
+        /// 镜像地址的生效默认值（设置为空时的回落）
         var mirrorDefaults: [String: String]
+        /// 插件依赖包索引的常用地址：名称 → 地址
+        var pypiIndexPresets: [String: String]?
         /// 环境变量中探测到的代理地址；env 模式下供用户确认
         var envProxyDetected: String
 
@@ -6960,8 +7612,10 @@ nonisolated extension API {
             case tmdbApiBaseUrl = "tmdb_api_base_url"
             case tmdbImageBaseUrl = "tmdb_image_base_url"
             case doubanApiBaseUrl = "douban_api_base_url"
+            case pypiIndexUrl = "pypi_index_url"
             case services
             case mirrorDefaults = "mirror_defaults"
+            case pypiIndexPresets = "pypi_index_presets"
             case envProxyDetected = "env_proxy_detected"
         }
     }
@@ -7312,6 +7966,14 @@ nonisolated extension API {
         var paths: [[String: String]]?
         /// 插件会给普通成员发通知时，须显式确认
         var allowMemberNotifications: Bool?
+        /// 同意安装的第三方依赖：填待批准包的 dependencies.lock_digest；锁文件与已安装版本相同时不用填
+        var dependencies: String?
+        /// 插件带网页时须显式确认：网页以正在使用它的人的身份运行（管理员打开时拥有管理员的全部权限）
+        var allowWeb: Bool?
+        /// 带网页时：加到侧边栏
+        var webNav: Bool?
+        /// 带网页时：成员也能看到
+        var webMembers: Bool?
 
         enum CodingKeys: String, CodingKey {
             case version
@@ -7319,6 +7981,41 @@ nonisolated extension API {
             case allowInline = "allow_inline"
             case paths
             case allowMemberNotifications = "allow_member_notifications"
+            case dependencies
+            case allowWeb = "allow_web"
+            case webNav = "web_nav"
+            case webMembers = "web_members"
+        }
+    }
+
+    struct PackageDependenciesView: Codable, Hashable, Sendable {
+        /// 锁文件内容哈希：批准时原样交回表示同意这一份依赖
+        var lockDigest: String
+        var packages: [API.DependencyView]
+        /// 这台服务器上要下载的总字节数（已知的部分）
+        var totalSize: Int
+        /// 含本机代码的包
+        var native: [String]
+        /// 没有适用于这台服务器平台的轮子的包
+        var unavailable: [String]
+        /// 相比已安装版本移除的包
+        var removed: [String]
+        /// 下载用的包索引地址
+        var index: String
+        var indexLabel: String
+        /// 锁文件与已批准的不同（或首次安装）：批准时须带上哈希
+        var needsConsent: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case lockDigest = "lock_digest"
+            case packages
+            case totalSize = "total_size"
+            case native
+            case unavailable
+            case removed
+            case index
+            case indexLabel = "index_label"
+            case needsConsent = "needs_consent"
         }
     }
 
@@ -7354,6 +8051,12 @@ nonisolated extension API {
         var installedVersion: String?
         /// 与随带的内置插件同 id：安装即替换它，卸载后随带版本回来
         var replacesBuiltin: Bool
+        /// 要下载安装的第三方包（清单 [dependencies]）；没有则为空
+        var dependencies: API.PackageDependenciesView?
+        /// 批准后正在安装依赖时的进度
+        var dependencyProgress: API.DependencyProgressView?
+        /// 带网页：侧边栏入口预览。批准时须 allow_web（网页以使用者的身份运行）
+        var web: API.PendingWebView?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -7375,6 +8078,9 @@ nonisolated extension API {
             case requires
             case installedVersion = "installed_version"
             case replacesBuiltin = "replaces_builtin"
+            case dependencies
+            case dependencyProgress = "dependency_progress"
+            case web
         }
     }
 
@@ -7505,6 +8211,24 @@ nonisolated extension API {
             case appPublishedAt = "app_published_at"
             case modelTag = "model_tag"
             case checkedAt = "checked_at"
+        }
+    }
+
+    /// 待批准的包带网页：批准页预览侧边栏入口，并须单独同意授信运行。
+    struct PendingWebView: Codable, Hashable, Sendable {
+        var id: String
+        var name: String
+        var source: String
+        /// iframe 加载的地址前缀
+        var base: String
+        var entries: [API.WebEntryView]
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case source
+            case base
+            case entries
         }
     }
 
@@ -7760,6 +8484,77 @@ nonisolated extension API {
             case endedAt = "ended_at"
             case detail
             case logTail = "log_tail"
+        }
+    }
+
+    /// 改自动跳过：总开关，或某部剧的片头。
+    struct PlaybackAutoSkipRequest: Codable, Hashable, Sendable {
+        var enabled: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+        }
+    }
+
+    /// 这个人的自动跳过设定（docs/design/skip-intro.md §5），跟账号走。
+    /// 客户端按它决定进了区间是直接跳还是只给按钮：广告、预告在 ``enabled`` 时直接跳；
+    /// 片头还要 ``intro``（用户在这部剧里手动跳过过一次片头）；其他类型永远只给按钮。
+    struct PlaybackAutoSkipView: Codable, Hashable, Sendable {
+        var enabled: Bool
+        var intro: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case enabled
+            case intro
+        }
+    }
+
+    /// 主播放列表的一段剪辑：取流地址、在剪辑里播哪一截、入口点表。
+    struct PlaybackBlurayClipView: Codable, Hashable, Sendable {
+        var url: String
+        var inTime: Int
+        var outTime: Int
+        var entryPts: [Int]
+        var entrySpn: [Int]
+
+        enum CodingKeys: String, CodingKey {
+            case url
+            case inTime = "in_time"
+            case outTime = "out_time"
+            case entryPts = "entry_pts"
+            case entrySpn = "entry_spn"
+        }
+    }
+
+    /// 蓝光主片里的一路音轨 / 字幕（disc-clip-play.md §3）。
+    struct PlaybackBlurayStreamView: Codable, Hashable, Sendable {
+        var ref: String
+        var pid: Int?
+        var codec: String?
+        var language: String?
+        var channels: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case ref
+            case pid
+            case codec
+            case language
+            case channels
+        }
+    }
+
+    /// 蓝光主片的剪辑清单（disc-clip-play.md）：服务端选主片、解析结构，播放器只解复用与拼接。
+    struct PlaybackBlurayView: Codable, Hashable, Sendable {
+        var playlist: String
+        var clips: [API.PlaybackBlurayClipView]
+        var audio: [API.PlaybackBlurayStreamView]
+        var subtitles: [API.PlaybackBlurayStreamView]
+
+        enum CodingKeys: String, CodingKey {
+            case playlist
+            case clips
+            case audio
+            case subtitles
         }
     }
 
@@ -8226,12 +9021,14 @@ nonisolated extension API {
         var trickplayEnabled: Bool?
         var transcodeCacheEnabled: Bool?
         var reelClipsEnabled: Bool?
+        var cloudStreamMode: String?
 
         enum CodingKeys: String, CodingKey {
             case softwareTranscodeEnabled = "software_transcode_enabled"
             case trickplayEnabled = "trickplay_enabled"
             case transcodeCacheEnabled = "transcode_cache_enabled"
             case reelClipsEnabled = "reel_clips_enabled"
+            case cloudStreamMode = "cloud_stream_mode"
         }
     }
 
@@ -8244,6 +9041,7 @@ nonisolated extension API {
         var transcodeCacheEnabled: Bool
         var reelClipsEnabled: Bool?
         var reelClipsProgress: API.ReelClipProgressView?
+        var cloudStreamMode: String?
         var hardwareAvailable: Bool
         var hwBackends: [String]
 
@@ -8253,6 +9051,7 @@ nonisolated extension API {
             case transcodeCacheEnabled = "transcode_cache_enabled"
             case reelClipsEnabled = "reel_clips_enabled"
             case reelClipsProgress = "reel_clips_progress"
+            case cloudStreamMode = "cloud_stream_mode"
             case hardwareAvailable = "hardware_available"
             case hwBackends = "hw_backends"
         }
@@ -8383,6 +9182,7 @@ nonisolated extension API {
         var source: API.PlaybackSourceView?
         var chapters: [API.PlaybackChapterMarkView]
         var segments: [API.PlaybackSegmentView]?
+        var autoSkip: API.PlaybackAutoSkipView?
         var matroskaCues: API.MatroskaCuesView?
 
         enum CodingKeys: String, CodingKey {
@@ -8399,6 +9199,7 @@ nonisolated extension API {
             case source
             case chapters
             case segments
+            case autoSkip = "auto_skip"
             case matroskaCues = "matroska_cues"
         }
     }
@@ -8414,6 +9215,7 @@ nonisolated extension API {
         var bitRate: Int?
         var frameRate: Double?
         var sizeBytes: Int?
+        var onDrive: Bool?
 
         enum CodingKeys: String, CodingKey {
             case container
@@ -8423,6 +9225,7 @@ nonisolated extension API {
             case bitRate = "bit_rate"
             case frameRate = "frame_rate"
             case sizeBytes = "size_bytes"
+            case onDrive = "on_drive"
         }
     }
 
@@ -13579,6 +14382,73 @@ nonisolated extension API {
         }
     }
 
+    struct WebConsentUpdate: Codable, Hashable, Sendable {
+        /// 加到侧边栏
+        var nav: Bool?
+        /// 成员也能看到
+        var members: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case nav
+            case members
+        }
+    }
+
+    struct WebConsentView: Codable, Hashable, Sendable {
+        /// 加到侧边栏
+        var nav: Bool
+        /// 成员也能看到（管理员总能看到）
+        var members: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case nav
+            case members
+        }
+    }
+
+    struct WebEntryView: Codable, Hashable, Sendable {
+        /// 侧边栏文字（manifest 的 short_name / name）
+        var label: String
+        /// 落点：相对插件网页根目录的子路径，主入口通常为空
+        var path: String
+        /// 图标地址；待批准的包是内嵌的 SVG data URL；没有则由前端用默认图标
+        var icon: String?
+        /// manifest 标了 purpose: monochrome：按遮罩用当前文字颜色着色
+        var monochrome: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case label
+            case path
+            case icon
+            case monochrome
+        }
+    }
+
+    /// 一个带网页的插件（插件包或本地插件），不论是否已同意。
+    struct WebPageView: Codable, Hashable, Sendable {
+        var id: String
+        var name: String
+        /// package：插件包；local：本地插件
+        var source: String
+        /// 用户已同意授信运行；没同意的不托管、不进侧边栏
+        var approved: Bool
+        var nav: Bool
+        var members: Bool
+        var base: String
+        var entries: [API.WebEntryView]
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case source
+            case approved
+            case nav
+            case members
+            case base
+            case entries
+        }
+    }
+
     /// 对外端口的保存请求体（PUT /app/port）。
     struct WebPortPayload: Codable, Hashable, Sendable {
         /// 要监听的对外端口（1~65535）；null 或 0 = 清除设置、恢复默认
@@ -13586,6 +14456,72 @@ nonisolated extension API {
 
         enum CodingKeys: String, CodingKey {
             case port
+        }
+    }
+
+    struct WebSearchConfigView: Codable, Hashable, Sendable {
+        /// 当前供应商 id；未配置为 null
+        var provider: String?
+        /// 是否已保存可用的供应商和密钥
+        var configured: Bool
+        /// 密钥末四位；未配置或过短时为空
+        var keyHint: String
+        var providers: [API.WebSearchProviderOption]
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case configured
+            case keyHint = "key_hint"
+            case providers
+        }
+    }
+
+    struct WebSearchProviderOption: Codable, Hashable, Sendable {
+        var id: String
+        var label: String
+        var signupUrl: String
+        var note: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case label
+            case signupUrl = "signup_url"
+            case note
+        }
+    }
+
+    struct WebSearchSavePayload: Codable, Hashable, Sendable {
+        /// tavily / exa / brave
+        var provider: String
+        /// API Key。编辑时留空沿用原密钥；更换供应商时必须重填
+        var apiKey: String?
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case apiKey = "api_key"
+        }
+    }
+
+    struct WebSearchTestPayload: Codable, Hashable, Sendable {
+        var provider: String?
+        /// 留空则测试已保存的密钥。本接口不保存
+        var apiKey: String?
+
+        enum CodingKeys: String, CodingKey {
+            case provider
+            case apiKey = "api_key"
+        }
+    }
+
+    struct WebSearchTestView: Codable, Hashable, Sendable {
+        var ok: Bool
+        var message: String
+        var sampleTitle: String?
+
+        enum CodingKeys: String, CodingKey {
+            case ok
+            case message
+            case sampleTitle = "sample_title"
         }
     }
 

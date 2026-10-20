@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Banner, ErrorBanner, StatusPill } from "@/components/cloud-push-ui";
 import { useConfirm, useToast } from "@/components/feedback";
+import { PluginAppIcon } from "@/components/plugin-app-icon";
+import { PluginWebPagesSection, WEB_PAGE_RISK } from "@/components/plugin-web-pages-section";
 import {
   SETTINGS_BUTTON_CLASS,
   SETTINGS_DANGER_BUTTON_CLASS,
@@ -18,13 +20,18 @@ import {
   approvePackage,
   discardPackage,
   listPackages,
+  retryPackageDependencies,
   rollbackPackage,
   uninstallPackage,
   uploadPackage,
   type InstalledPackage,
+  type PackageDependencies,
   type PackageRequest,
   type PluginInfo,
+  type WebConsent,
 } from "@/lib/api/plugins";
+import { appHref } from "@/lib/plugin-apps";
+import { usePluginApps } from "@/lib/plugin-apps-context";
 import {
   isNewGrant,
   localPluginRuntimes,
@@ -55,6 +62,9 @@ export function PluginPackagesSection({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reviewing, setReviewing] = useState<PackageRequest | null>(null);
+  // 装卸之后「插件网页」小节与侧边栏都要跟着刷新
+  const [webVersion, setWebVersion] = useState(0);
+  const { refresh: refreshApps } = usePluginApps();
   const fileInput = useRef<HTMLInputElement>(null);
   const confirm = useConfirm();
   const toast = useToast();
@@ -72,7 +82,9 @@ export function PluginPackagesSection({
   const refresh = useCallback(() => {
     reload();
     onChanged();
-  }, [reload, onChanged]);
+    setWebVersion((v) => v + 1);
+    refreshApps();
+  }, [reload, onChanged, refreshApps]);
   useEffect(() => {
     reload();
   }, [reload]);
@@ -84,6 +96,14 @@ export function PluginPackagesSection({
     const timer = window.setInterval(refresh, 5000);
     return () => window.clearInterval(timer);
   }, [watching, refresh]);
+  // 后台在装依赖（主程序换了 Python 版本等）：进度与装好后的状态要跟着刷新
+  const installing =
+    installed?.some((item) => item.dependencies?.progress?.phase === "installing") ?? false;
+  useEffect(() => {
+    if (!installing) return;
+    const timer = window.setInterval(refresh, 2000);
+    return () => window.clearInterval(timer);
+  }, [installing, refresh]);
 
   const run = useCallback(
     async (action: () => Promise<void>) => {
@@ -108,9 +128,14 @@ export function PluginPackagesSection({
     });
   };
 
-  const approve = (item: PackageRequest, allowInline: boolean, allowMembers: boolean) =>
+  const approve = (
+    item: PackageRequest,
+    allowInline: boolean,
+    allowMembers: boolean,
+    web: WebConsent | null,
+  ) =>
     run(async () => {
-      const result = await approvePackage(item, allowInline, allowMembers);
+      const result = await approvePackage(item, allowInline, allowMembers, web);
       setReviewing(null);
       if (result.status === "active") {
         toast.success(`「${item.title}」v${item.version} 已安装并运行`);
@@ -135,6 +160,13 @@ export function PluginPackagesSection({
       toast.success(`已回到 v${result.version}`);
     });
   };
+
+  const retryDependencies = (item: InstalledPackage) =>
+    run(async () => {
+      const result = await retryPackageDependencies(item.id);
+      if (result.state === "active") toast.success(`「${item.title}」的依赖已装好，已运行`);
+      else toast.error(`依赖已装好，但插件没能运行：${result.error ?? result.state}`);
+    });
 
   const uninstall = async (item: InstalledPackage) => {
     const result = await confirm({
@@ -167,10 +199,10 @@ export function PluginPackagesSection({
         description={installed ? `${installed.length} 个已安装` : undefined}
         action={
           <>
+            {/* 不设 accept：手机浏览器不认 .mcplugin，会置灰选不了；格式由服务端校验 */}
             <input
               ref={fileInput}
               type="file"
-              accept=".mcplugin,.zip"
               className="hidden"
               onChange={(event) => {
                 onFile(event.target.files?.[0]);
@@ -223,40 +255,61 @@ export function PluginPackagesSection({
             <p className="px-1 text-sub text-[var(--text-muted)]">还没有安装第三方插件。</p>
           ) : (
             <SettingsList>
-              {installed.map((item) => (
-                <SettingsRow
-                  key={item.id}
-                  label={item.title}
-                  description={packageDetail(item)}
-                  error={item.state === "active" ? null : item.error}
-                  href={pluginHref(item.id)}
-                >
-                  <StatusPill
-                    tone={item.state === "unloaded" ? "neutral" : pluginStateTone(item.state)}
-                    label={item.state === "unloaded" ? "未加载" : pluginStateLabel(item.state)}
-                  />
-                  <SettingsMoreMenu
-                    label={`「${item.title}」的更多操作`}
-                    disabled={busy}
-                    items={[
-                      ...(item.previous_version
-                        ? [
-                            {
-                              label: `回到上一版 v${item.previous_version}`,
-                              onSelect: () => void rollback(item),
-                              warn: true,
-                            },
-                          ]
-                        : []),
-                      { label: "卸载", onSelect: () => void uninstall(item), danger: true },
-                    ]}
-                  />
-                </SettingsRow>
-              ))}
+              {installed.map((item) => {
+                const progress = item.dependencies?.progress ?? null;
+                return (
+                  <SettingsRow
+                    key={item.id}
+                    label={item.title}
+                    description={packageDetail(item)}
+                    error={
+                      progress?.phase === "failed"
+                        ? `依赖安装失败：${progress.error ?? "未知原因"}`
+                        : item.state === "active"
+                          ? null
+                          : item.error
+                    }
+                    href={pluginHref(item.id)}
+                  >
+                    {progress ? (
+                      <StatusPill
+                        tone={progress.phase === "failed" ? "danger" : "neutral"}
+                        label={progress.phase === "failed" ? "依赖没装上" : "正在安装依赖"}
+                      />
+                    ) : (
+                      <StatusPill
+                        tone={item.state === "unloaded" ? "neutral" : pluginStateTone(item.state)}
+                        label={item.state === "unloaded" ? "未加载" : pluginStateLabel(item.state)}
+                      />
+                    )}
+                    <SettingsMoreMenu
+                      label={`「${item.title}」的更多操作`}
+                      disabled={busy}
+                      items={[
+                        ...(progress?.phase === "failed"
+                          ? [{ label: "重试安装依赖", onSelect: () => void retryDependencies(item) }]
+                          : []),
+                        ...(item.previous_version
+                          ? [
+                              {
+                                label: `回到上一版 v${item.previous_version}`,
+                                onSelect: () => void rollback(item),
+                                warn: true,
+                              },
+                            ]
+                          : []),
+                        { label: "卸载", onSelect: () => void uninstall(item), danger: true },
+                      ]}
+                    />
+                  </SettingsRow>
+                );
+              })}
             </SettingsList>
           )}
         </div>
       </SettingsSection>
+
+      <PluginWebPagesSection reloadKey={webVersion} />
 
       {locals.length > 0 && (
         <SettingsSection
@@ -282,10 +335,11 @@ export function PluginPackagesSection({
 
       <ReviewDrawer
         item={reviewing}
+        currentWeb={installed?.find((p) => p.id === reviewing?.id)?.web ?? null}
         busy={busy}
         onClose={() => setReviewing(null)}
-        onApprove={(item, allowInline, allowMembers) =>
-          void approve(item, allowInline, allowMembers)
+        onApprove={(item, allowInline, allowMembers, web) =>
+          void approve(item, allowInline, allowMembers, web)
         }
         onDiscard={(item) =>
           void run(async () => {
@@ -318,25 +372,43 @@ function LocalRuntimeNote({ locals }: { locals: PluginInfo[] }) {
 /** 批准抽屉：逐项列出它要什么，升级时新增的申请高亮；申请主进程运行须单独勾选。 */
 function ReviewDrawer({
   item,
+  currentWeb,
   busy,
   onClose,
   onApprove,
   onDiscard,
 }: {
   item: PackageRequest | null;
+  /** 升级时当前版本对网页的同意：两个勾选沿用它 */
+  currentWeb: WebConsent | null;
   busy: boolean;
   onClose: () => void;
-  onApprove: (item: PackageRequest, allowInline: boolean, allowMembers: boolean) => void;
+  onApprove: (
+    item: PackageRequest,
+    allowInline: boolean,
+    allowMembers: boolean,
+    web: WebConsent | null,
+  ) => void;
   onDiscard: (item: PackageRequest) => void;
 }) {
   const [allowInline, setAllowInline] = useState(false);
   const [allowMembers, setAllowMembers] = useState(false);
+  // 带网页：须单独同意授信运行；加不加侧边栏、成员能不能看到由用户定（docs/design/plugin-web-pages.md §5）
+  const [allowWeb, setAllowWeb] = useState(false);
+  const [webNav, setWebNav] = useState(true);
+  const [webMembers, setWebMembers] = useState(false);
   useEffect(() => {
     setAllowInline(false);
     setAllowMembers(false);
+    // 授信每个版本都重新问；加不加侧边栏、成员能不能看到沿用当前版本的选择
+    setAllowWeb(false);
+    setWebNav(currentWeb?.nav ?? true);
+    setWebMembers(currentWeb?.members ?? false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在换了一个待批准的包时重置
   }, [item]);
   if (!item) return null;
   const inline = item.runtime === "inline";
+  const web = item.web ?? null;
   const notifiesMembers = item.notifies_members === true;
   const upgrade = item.installed_version !== null;
   const newBadge = (
@@ -373,11 +445,23 @@ function ReviewDrawer({
           </button>
           <button
             type="button"
-            disabled={busy || (inline && !allowInline) || (notifiesMembers && !allowMembers)}
-            onClick={() => onApprove(item, allowInline, allowMembers)}
+            disabled={
+              busy ||
+              (inline && !allowInline) ||
+              (notifiesMembers && !allowMembers) ||
+              (web !== null && !allowWeb)
+            }
+            onClick={() =>
+              onApprove(
+                item,
+                allowInline,
+                allowMembers,
+                web ? { nav: webNav, members: webMembers } : null,
+              )
+            }
             className={SETTINGS_PRIMARY_BUTTON_CLASS}
           >
-            {busy ? "正在安装…" : "批准并安装"}
+            {busy ? (item.dependencies ? "正在下载安装依赖…" : "正在安装…") : "批准并安装"}
           </button>
         </>
       }
@@ -401,6 +485,53 @@ function ReviewDrawer({
             </label>
           )}
         </div>
+        {web && (
+          <div>
+            <dt className="mb-1.5 font-medium text-[var(--text)]">自带网页</dt>
+            <dd className="space-y-2">
+              <ul className="space-y-1.5">
+                {web.entries.map((entry) => (
+                  <li key={entry.path} className="flex items-center gap-2 text-[var(--text)]">
+                    <PluginAppIcon
+                      src={entry.icon}
+                      monochrome={entry.monochrome}
+                      className="size-[18px] text-[var(--text-muted)]"
+                    />
+                    {entry.label}
+                    <code className="text-caption text-[var(--text-faint)]">
+                      {appHref(item.id, entry.path)}
+                    </code>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-[var(--danger)]">{WEB_PAGE_RISK}</p>
+              <label className="flex items-center gap-2 text-[var(--danger)]">
+                <input
+                  type="checkbox"
+                  checked={allowWeb}
+                  onChange={(event) => setAllowWeb(event.target.checked)}
+                />
+                我信任这个插件的网页
+              </label>
+              <label className="flex items-center gap-2 text-[var(--text-muted)]">
+                <input
+                  type="checkbox"
+                  checked={webNav}
+                  onChange={(event) => setWebNav(event.target.checked)}
+                />
+                加到侧边栏
+              </label>
+              <label className="flex items-center gap-2 text-[var(--text-muted)]">
+                <input
+                  type="checkbox"
+                  checked={webMembers}
+                  onChange={(event) => setWebMembers(event.target.checked)}
+                />
+                成员也能看到
+              </label>
+            </dd>
+          </div>
+        )}
         <div>
           <dt className="mb-1.5 font-medium text-[var(--text)]">能调用的操作</dt>
           <dd>
@@ -439,6 +570,9 @@ function ReviewDrawer({
             )}
           </dd>
         </div>
+        {item.dependencies && (
+          <DependenciesSection dependencies={item.dependencies} upgrade={upgrade} />
+        )}
         {(item.callbacks?.length ?? 0) > 0 && (
           <div>
             <dt className="mb-1.5 font-medium text-[var(--text)]">开放的回调地址</dt>
@@ -536,5 +670,63 @@ function ReviewDrawer({
         )}
       </dl>
     </SettingsDrawer>
+  );
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function DependenciesSection({
+  dependencies,
+  upgrade,
+}: {
+  dependencies: PackageDependencies;
+  upgrade: boolean;
+}) {
+  const changed = upgrade && dependencies.needs_consent;
+  const count = dependencies.packages.length;
+  const badge = "rounded-full bg-[var(--warn)]/15 px-1.5 text-caption text-[var(--warn)]";
+  return (
+    <div>
+      <dt className="mb-1.5 font-medium text-[var(--text)]">
+        {upgrade && !dependencies.needs_consent
+          ? `第三方包（${count} 个，与当前版本相同）`
+          : `需要下载并安装 ${count} 个第三方包（共 ${formatSize(dependencies.total_size)}，来自 ${dependencies.index_label}）`}
+      </dt>
+      <dd className="space-y-1.5">
+        <p className="text-[var(--text-muted)]">
+          这些包在插件自己的进程里运行，权限与插件相同。含本机代码的包更难审查，单独标出。
+        </p>
+        <ul className="space-y-1">
+          {dependencies.packages.map((dep) => (
+            <li key={dep.name} className="flex flex-wrap items-baseline gap-x-2 text-[var(--text)]">
+              <span>
+                {dep.name} <span className="text-[var(--text-muted)]">{dep.version}</span>
+              </span>
+              {dep.native && <span className="text-caption text-[var(--warn)]">含本机代码</span>}
+              {dep.size !== null && (
+                <span className="text-caption text-[var(--text-faint)]">{formatSize(dep.size)}</span>
+              )}
+              {!dep.available && (
+                <span className="text-caption text-[var(--danger)]">
+                  没有适用于这台服务器的版本，装不上
+                </span>
+              )}
+              {changed && dep.change === "added" && <span className={badge}>新增</span>}
+              {changed && dep.change === "changed" && (
+                <span className={badge}>原 {dep.previous_version}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {changed && dependencies.removed.length > 0 && (
+          <p className="text-caption text-[var(--text-muted)]">
+            不再需要：{dependencies.removed.join("、")}
+          </p>
+        )}
+      </dd>
+    </div>
   );
 }

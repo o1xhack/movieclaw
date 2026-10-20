@@ -5,6 +5,7 @@ import SwiftUI
 
 /// 离线模式顶部的提示条：说明在看的是 iPhone 上的内容，可以手动重连
 struct OfflineBanner: View {
+    @Environment(\.cardMetrics) private var cards
     @State private var reachability = ServerReachability.shared
     @State private var store = OfflineStore.shared
 
@@ -14,7 +15,7 @@ struct OfflineBanner: View {
                 .foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
                 Text("离线浏览").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
-                Text("显示 iPhone 上已下载的 \(store.downloadedItemIds.count) 部")
+                Text("显示 \(ClientPlatform.deviceName) 上已下载的 \(store.downloadedItemIds.count) 部")
                     .font(.caption).foregroundStyle(Theme.textMuted)
             }
             Spacer(minLength: 8)
@@ -26,7 +27,7 @@ struct OfflineBanner: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(Theme.warning.opacity(0.08), in: .rect(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.warning.opacity(0.22)))
-        .padding(.horizontal, Theme.pagePadding)
+        .padding(.horizontal, cards.edge)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("offline-banner")
     }
@@ -42,10 +43,11 @@ struct OfflinePlaceholder: View {
         ContentUnavailableView {
             Label(title, systemImage: "wifi.slash")
         } description: {
-            Text("这里需要连接服务器。iPhone 上已下载的影片在「媒体库」里，可以照常播放。")
+            Text("这里需要连接服务器。\(ClientPlatform.deviceName) 上已下载的影片在「媒体库」里，可以照常播放。")
         } actions: {
+            // App 的 tint 是冷银（近白），裸 .glassProminent 会白底白字看不清
             Button("去媒体库") { router.selectTab(.library) }
-                .buttonStyle(.glassProminent)
+                .discoverProminentButton()
             Button("重新连接") { reachability.reconnect() }
                 .buttonStyle(.glass)
         }
@@ -99,7 +101,7 @@ struct OfflinePosterCell: View {
                 OfflineDownloader.shared.deleteItem(item.mediaItemId)
             }
         } message: {
-            Text("只删 iPhone 上的副本，观看进度会保留。")
+            Text("只删 \(ClientPlatform.deviceName) 上的副本，观看进度会保留。")
         }
         .accessibilityIdentifier("offline-item-\(item.mediaItemId)")
     }
@@ -107,6 +109,7 @@ struct OfflinePosterCell: View {
 
 /// 离线首页：接着看 + 按库分组的已下载条目
 struct OfflineLibraryHomeView: View {
+    @Environment(\.cardMetrics) private var cards
     @State private var store = OfflineStore.shared
     @Environment(\.api) private var api
 
@@ -115,7 +118,7 @@ struct OfflineLibraryHomeView: View {
         VStack(alignment: .leading, spacing: 0) {
             OfflineBanner().padding(.top, 12)
             if items.isEmpty {
-                EmptyState(systemImage: "arrow.down.circle", title: "iPhone 上还没有下载",
+                EmptyState(systemImage: "arrow.down.circle", title: "\(ClientPlatform.deviceName) 上还没有下载",
                            message: "连上服务器后，在影片详情页点「下载」，没网的时候也能看。")
                     .padding(.top, 40)
             } else {
@@ -129,7 +132,7 @@ struct OfflineLibraryHomeView: View {
                             LazyHStack(alignment: .top, spacing: 12) {
                                 ForEach(group.items) { OfflinePosterCell(item: $0) }
                             }
-                            .padding(.horizontal, Theme.pagePadding)
+                            .padding(.horizontal, cards.edge)
                         }
                         .scrollClipDisabled()
                     }
@@ -186,7 +189,7 @@ struct OfflineLibraryHomeView: View {
                             OfflineResumeCard(item: entry.item, unit: entry.unit, progress: entry.progress)
                         }
                     }
-                    .padding(.horizontal, Theme.pagePadding)
+                    .padding(.horizontal, cards.edge)
                 }
                 .scrollClipDisabled()
             }
@@ -249,7 +252,7 @@ struct OfflineLibraryWall: View {
             VStack(alignment: .leading, spacing: 16) {
                 OfflineBanner().padding(.top, 8)
                 if sorted.isEmpty {
-                    EmptyState(systemImage: "arrow.down.circle", title: "这个库在 iPhone 上没有下载")
+                    EmptyState(systemImage: "arrow.down.circle", title: "这个库在 \(ClientPlatform.deviceName) 上没有下载")
                         .padding(.top, 40)
                 } else {
                     LibraryPosterGrid(items: sorted) { item in
@@ -280,6 +283,7 @@ struct OfflineLibraryWall: View {
 /// 在线首页的「正在下载」提示条：有排队 / 下载中 / 暂停 / 失败的单元时才出现，下完自动消失。
 /// 只汇总（在下什么、总速度、总进度）；每一集的状态在「我的 → 下载」的「下载中」里，点一下进去
 struct OfflineDownloadingRow: View {
+    @Environment(\.cardMetrics) private var cards
     @State private var store = OfflineStore.shared
 
     var body: some View {
@@ -302,7 +306,7 @@ struct OfflineDownloadingRow: View {
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, Theme.pagePadding)
+            .padding(.horizontal, cards.edge)
             .padding(.top, 16)
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("home-downloading")
@@ -496,7 +500,7 @@ struct OfflineMinimalDetail: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title).font(.title3.weight(.semibold))
                             if let year = item.year { Text(String(year)).foregroundStyle(Theme.textMuted) }
-                            Text("iPhone 上的副本").font(.caption).foregroundStyle(Theme.textFaint)
+                            Text("\(ClientPlatform.deviceName) 上的副本").font(.caption).foregroundStyle(Theme.textFaint)
                         }
                     }
                 }

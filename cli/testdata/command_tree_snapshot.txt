@@ -11,14 +11,18 @@ app plugins list
 app plugins packages approve
 app plugins packages discard
 app plugins packages list
+app plugins packages retry-dependencies
 app plugins packages rollback
 app plugins packages uninstall
 app plugins packages upload
+app plugins pages list
 app plugins safe-mode exit
 app plugins settings show
 app plugins settings update
 app plugins show
 app plugins switch
+app plugins web revoke
+app plugins web update
 app port set
 app restart
 app set
@@ -99,6 +103,20 @@ dl torrent replace
 dl types list
 dl update
 dl verify
+drives accounts cookie
+drives accounts delete
+drives accounts dirs
+drives accounts form
+drives accounts list
+drives accounts refresh
+drives accounts update
+drives backends list
+drives logins cancel
+drives logins start
+drives logins status
+drives settings get
+drives settings update
+drives status
 extension cookies push
 extension ping
 extension sites list

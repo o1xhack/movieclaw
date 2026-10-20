@@ -26,9 +26,12 @@ app plugins packages
 app plugins packages approve
 app plugins packages discard
 app plugins packages list
+app plugins packages retry-dependencies
 app plugins packages rollback
 app plugins packages uninstall
 app plugins packages upload
+app plugins pages
+app plugins pages list
 app plugins safe-mode
 app plugins safe-mode exit
 app plugins settings
@@ -36,6 +39,9 @@ app plugins settings show
 app plugins settings update
 app plugins show
 app plugins switch
+app plugins web
+app plugins web revoke
+app plugins web update
 app port
 app port set
 app restart
@@ -148,6 +154,25 @@ dl types list
 dl update
 dl verify
 download
+drives
+drives accounts
+drives accounts cookie
+drives accounts delete
+drives accounts dirs
+drives accounts form
+drives accounts list
+drives accounts refresh
+drives accounts update
+drives backends
+drives backends list
+drives logins
+drives logins cancel
+drives logins start
+drives logins status
+drives settings
+drives settings get
+drives settings update
+drives status
 extension
 extension cookies
 extension cookies push

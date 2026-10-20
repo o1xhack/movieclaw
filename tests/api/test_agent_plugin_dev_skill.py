@@ -157,6 +157,29 @@ def test_check_script_catches_typical_mistakes(tmp_path) -> None:
     assert "没有名为 bad 的 @plugin" in checked.stdout
 
 
+def test_check_script_reports_dependencies_and_missing_platforms(tmp_path) -> None:
+    from tests.unit.test_plugin_deps_lock import LZ4, block, lock
+
+    made = _run(
+        "new_plugin.py", "plugins/deps", "--id", "deps-demo", "--title", "依赖", cwd=tmp_path
+    )
+    assert made.returncode == 0, made.stdout + made.stderr
+    plugin_dir = tmp_path / "plugins" / "deps"
+    manifest = plugin_dir / "movieclaw-plugin.toml"
+    manifest.write_text(
+        manifest.read_text("utf-8") + '\n[dependencies]\nlock = "requirements.lock"\n', "utf-8"
+    )
+    (plugin_dir / "requirements.lock").write_text(lock(block("lz4==4.4.4", LZ4[:1])), "utf-8")
+    checked = _run("check_plugin.py", "plugins/deps", cwd=tmp_path)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert "第三方依赖：1 个包" in checked.stdout and "含本机代码：lz4" in checked.stdout
+    assert "依赖没有 linux/arm64 的轮子：lz4 4.4.4" in checked.stdout
+
+    (plugin_dir / "requirements.lock").write_text(lock(block("lz4>=4", LZ4)), "utf-8")
+    checked = _run("check_plugin.py", "plugins/deps", cwd=tmp_path)
+    assert checked.returncode == 1 and "lz4 没有钉死版本" in checked.stdout
+
+
 def test_check_script_rejects_a_registry_in_inject(tmp_path) -> None:
     """真实会话里出过的错：把 IM_CHANNELS 写进 inject，插件永远等不到这个「服务」。"""
     made = _run("new_plugin.py", "plugins/chan", "--id", "chan", "--title", "通道", cwd=tmp_path)
@@ -265,6 +288,59 @@ def test_scaffolded_plugin_installs_serves_and_uninstalls(data_dir) -> None:
         assert client.get("/api/v1/plugins/media-stats/status").status_code == 404
 
 
+def test_scaffolded_web_page_checks_installs_and_is_served(data_dir) -> None:
+    """只带网页的骨架（new_plugin.py --web）：检查通过并提示授信、装上后侧边栏有它、页面能取到。"""
+    work = data_dir / "workspace"
+    work.mkdir()
+    made = _run(
+        "new_plugin.py",
+        "plugins/weekly-board",
+        "--id",
+        "weekly-board",
+        "--title",
+        "本周看板",
+        "--web",
+        cwd=work,
+    )
+    assert made.returncode == 0, made.stdout + made.stderr
+    plugin_dir = work / "plugins" / "weekly-board"
+    assert (plugin_dir / "web" / "index.html").is_file()
+    assert not list(plugin_dir.glob("*.py"))
+    checked = _run("check_plugin.py", "plugins/weekly-board", cwd=work)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert "✗" not in checked.stdout
+    assert "--allow-web" in checked.stdout and "/apps/weekly-board" in checked.stdout
+    # 典型错误：跳主程序的链接没写 target="_top"
+    index = plugin_dir / "web" / "index.html"
+    index.write_text(index.read_text("utf-8") + '<a href="/library">媒体库</a>', "utf-8")
+    assert 'target="_top"' in _run("check_plugin.py", "plugins/weekly-board", cwd=work).stdout
+
+    from movieclaw_api.api.deps import require_admin, require_login
+    from movieclaw_api.app import create_app
+    from movieclaw_api.services.auth import Principal
+
+    app = create_app()
+    admin = Principal(kind="admin", name="tester", is_admin=True)
+    app.dependency_overrides[require_admin] = lambda: admin
+    app.dependency_overrides[require_login] = lambda: admin
+    with TestClient(app) as client:
+        reply = client.post(
+            "/api/v1/app/plugins/packages",
+            files={"file": ("weekly-board.mcplugin", _zip(plugin_dir), "application/zip")},
+        )
+        assert reply.status_code == 200, reply.text
+        assert reply.json()["data"]["web"]["entries"][0]["label"] == "本周看板"
+        result = client.post(
+            "/api/v1/app/plugins/packages/weekly-board/approve",
+            json={"version": "0.1.0", "operations": [], "allow_web": True},
+        ).json()["data"]
+        assert result["status"] == "active", result
+        apps = client.get("/api/v1/ui/apps").json()["data"]
+        assert [(a["id"], a["entries"][0]["monochrome"]) for a in apps] == [("weekly-board", True)]
+        page = client.get("/api/v1/plugins/weekly-board/web/")
+        assert page.status_code == 200 and "本周看板" in page.text
+
+
 def test_check_script_wants_callbacks_declared(tmp_path) -> None:
     made = _run("new_plugin.py", "plugins/hooky", "--id", "hooky", "--title", "回调", cwd=tmp_path)
     assert made.returncode == 0, made.stdout + made.stderr
@@ -284,3 +360,17 @@ def test_check_script_wants_callbacks_declared(tmp_path) -> None:
     )
     checked = _run("check_plugin.py", "plugins/hooky", cwd=tmp_path)
     assert checked.returncode == 0, checked.stdout
+
+
+def test_api_script_shows_address_params_and_typed_fields(tmp_path) -> None:
+    """写插件网页查接口用：地址、查询参数名、返回 data 的字段与类型（数据为空时也查得到）。"""
+    shown = _run("api.py", "dl", "tasks", cwd=tmp_path)
+    assert shown.returncode == 0, shown.stdout + shown.stderr
+    assert "GET /api/v1/downloaders/tasks" in shown.stdout
+    assert "progress: number" in shown.stdout and "state: downloading" in shown.stdout
+    assert "权限：仅管理员" in shown.stdout  # 下载器整组只给管理员（路由组上的依赖）
+    items = _run("api.py", "library.items.list", cwd=tmp_path)
+    assert "query 参数 res" in items.stdout and "path 参数 library_id" in items.stdout
+    assert "权限：登录即可" in items.stdout
+    missing = _run("api.py", "no.such.op", cwd=tmp_path)
+    assert missing.returncode == 1 and "mclaw" in missing.stdout

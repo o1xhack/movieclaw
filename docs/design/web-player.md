@@ -255,7 +255,9 @@ ffmpeg -hwaccel vaapi -hwaccel_output_format vaapi -hwaccel_device <dev>
      源为 SDR                               → 无约束
      源为 HDR10/HLG 且 hdr.dynamicRange=high 且视频可 copy → 直通
      源为 DV P5                             → 必须转码 + tone-map（见 §7-④）
-     源为 DV P7                             → 丢弃 EL 层后按 HDR10 处理
+     源为 DV P7（基础层兼容）且可直出 HDR    → 换封装剥掉 EL 与 RPU（NAL 63/62）、打 hvc1，
+                                              按 HDR10 直通（不给原文件：ExoPlayer 解不了 P7
+                                              时不退回 HEVC 解码器）；播放器申报了 P7 的照申报
      需 tone-map 但无可用 GPU               → 拒绝，reason 说明原因
                                               （软件 tone-map 4K 是幻灯片，不硬撑）
 
@@ -351,6 +353,15 @@ class PlaybackPlan(BaseModel):
 
 **DV profile**。`dv_profile` 必须单独分支——P5 用 IPTPQc2 色彩空间，当成普通
 HDR10 处理会输出**绿紫画面**（见 §7-④）。
+
+**记录与码流矛盾的 DV**（2026-10-15）。反过来的坑：发布组把流媒体版的 P5 RPU 原样注进
+另一版的 HDR10 / HDR10+ 基础层、没转成 8.1（文件名常带「DV HDR10+ Hybrid」），容器记录
+写 P5，码流 VUI 却声明 BT.2020 YCbCr PQ。照记录按 P5 还原，YCbCr 被当 IPT 算，同样整片
+偏绿或偏紫。真 P5 不写 VUI（NAS 375 个 P5 全是空），所以探测把「记录 P5 + VUI 声明 YCbCr
+HDR」认定为基础层格式（`hdr="HDR10"`，记录原样留在 `dv_profile`），各条路径只放基础层：
+转码与抓帧关掉 `apply_dovi`；会读原文件记录的播放器（ExoPlayer、老版本 App）不给原文件、
+改给换封装（封装打 hvc1，记录不进流）；App 新版自研引擎申报 `dolby_vision_record_audit`，
+照常拿原文件，自己核对后放基础层（引擎补丁 P62）。
 
 **多候选择优**。同一条目常有 1080p / 2160p 两个版本
 （[disc-version-layout.md](disc-version-layout.md)）。决策接口的形状必须是
@@ -685,6 +696,8 @@ compression、参数集只在 CodecPrivate、开放 GOP……穷举不完。因�
 档 2 正好修好。浏览器给不出可靠的失败归因，只能取舍：多试一档只浪费几秒
 （一次性），跳过档 2 却可能让本可直通的视频永久多转一路（每次播放都付）。
 这个不对称决定了保留 1→2。无可用显卡时降档要越过档 3 直接落档 4。
+被失败顶到档 2 及以下的会话，音轨一律固定为 AAC-LC 双声道（源轨已是 AAC 双声道的照旧
+copy；#906）：上一档的失败让客户端申报的音频能力不可信，降档不能再沿用「可直通」。
    → 兜底档仍失败 → 中文错误 + 诊断面板 + 建议用第三方播放器
 ```
 
@@ -1198,6 +1211,7 @@ ref——`setChromeVisible(true)` 是异步的，click 回调读到的可能已�
 | ㉘ | **stall 判定把「追上转码器」当解码卡死** | 烧录/软转会话起步慢，前方缓冲剩 0.5~2 秒卡住 8 秒就被降档——「选个 PGS 字幕先给我降了一档」 | 解码卡死要求前方缓冲 ≥3 秒；只剩零头按缺粮给 45 秒长限（`stall.ts`） |
 | ㉙ | **换会话后用 watch 记忆覆盖用户刚点的字幕** | 烧录切回 SRT，轨记忆里还是 PGS，用户的选择被悄悄撤销、字幕不显示 | 本单元内用户表过态后「初始字幕选择」不再插手（subtitleTouchedRef） |
 | ㉚ | **degraded_from 无条件标 min(failed_tiers)** | 历史上失败过一次，之后每个会话都被诊断面板标「降档而来」——包括与那次失败毫无关系的烧录会话 | 只在本次真被 failed_tiers 顶下来时标（`_resolve_tier` 返回真实降档起点） |
+| ㉛ | **降档只推档位号，音轨判定沿用原结论** | 小米电视申报能解 AC3、实际一放就停滞（#906）：档 2「音频单转」照样 copy AC3，档 4 也只转了视频，全档失败 | 被顶下来的会话音轨固定为 AAC-LC 双声道（`_degraded_audio`）；Android TV 实验台 `audio-stall-ac3` 场景复现 |
 
 ---
 

@@ -47,31 +47,34 @@
 | 不做 | 发现、订阅、片段、大图预告、设置、活动、AI 助手、待处理事项、站点资源、媒体库管理、分享 | — |
 
 导航照 Apple TV 的最终形态：左侧可收起的抽屉（`tv-material` 的 `NavigationDrawer`），只有 **账号 / 搜索 / 首页** 三项；
-二级页（详情、海报墙、影人页）压在抽屉之上、盖住整屏，返回键退回。
+二级页（详情、海报墙、影人页）压在抽屉之上、盖住整屏，返回键退回。页签根页上：账号 / 搜索按返回回首页页签；
+首页按返回先在顶部提示「再按一次返回键退出」，2 秒内再按才退出 App。Android TV 设计规范不建议退出时弹确认对话框，
+所以用不挡操作的「连按两次」（国内电视 App 的常见做法）；判断在 `backAction`（`BackActionTest` 锁住）。
 
 ## 3. 工程
 
 ### 3.1 目录
 
-独立的 Gradle 工程，按「核心 / 功能」分模块，核心模块不依赖任何界面：
+独立的 Gradle 工程，按「核心 / 功能」分模块，核心模块不依赖任何界面。播放引擎、接口与模型与安卓手机版共用，
+源码在 `apps/android-core`（iOS 的 `Shared/` 同理），两个工程的 settings 按路径把它们挂成 `:core:*`：
 
 ```
+apps/android-core/          TV 与手机共用（依赖版本：gradle/shared.versions.toml，以 `shared` 引用）
+  model/        接口数据模型（纯 Kotlin，可空带默认值；生成物在 generated/）
+  network/      OkHttp 客户端、信封解包、错误中文化、User-Agent、令牌注入；生成的 McApi
+  playback/     会话协议、能力探测、Exo 编排、进度 / 心跳上报、跳过段、选轨、看门狗与兜底阶梯
+  ffmpeg/       Media3 decoder_ffmpeg 音频扩展（§4.3）
+  native/ffmpeg/  LGPL FFmpeg 音频扩展的编译脚本（产物不入库）
+  scripts/gen_api.py  接口生成器（白名单）
 apps/android-tv/
-  settings.gradle.kts / build.gradle.kts / gradle/libs.versions.toml（依赖版本唯一来源）
+  settings.gradle.kts / build.gradle.kts / gradle/libs.versions.toml（TV 自己的依赖版本）
   version.properties
-  core/
-    model/        接口数据模型（纯 Kotlin，可空带默认值）
-    network/      OkHttp 客户端、信封解包、错误中文化、User-Agent、令牌注入
-    session/      服务器发现、登录 / 配对状态机、账号库（KeyStore 加密）、权限
-    playback/     会话协议、能力探测、引擎抽象（Player 接口）、进度 / 心跳上报、跳过段、选轨
-  feature/
-    onboarding/ home/ library/ detail/ search/ player/ accounts/ about/
-  app/            Application、MainActivity、导航壳、AppGraph
-  native/ffmpeg/  LGPL FFmpeg 音频扩展的编译脚本（产物不入库，§4.3）
-  tests/          端到端（遥控器按键驱动）
+  core/session/ 服务器发现、登录 / 配对状态机、账号库（KeyStore 加密）、权限
+  app/          Application、MainActivity、导航壳、AppGraph、各页面
+  tests/        端到端（遥控器按键驱动）
 ```
 
-模块边界的目的：播放与会话逻辑可以单测、可以换引擎，以后若要做安卓手机界面，`core/*` 原样共用。
+模块边界的目的：播放与会话逻辑可以单测、可以换引擎，手机界面与 TV 界面共用同一套 `core/*`。
 
 ### 3.2 约定
 
@@ -250,7 +253,9 @@ HEVC + AC3 MKV）。
 - 搜索键盘没有拼音候选行（tvOS 的中文拼音输入法自带）：拼音首字母本来就能搜中文片名，打汉字走系统输入法；
 - 字体：Noto CJK 比 PingFang 宽、行框高，长简介可能多折一行、各行有十来点的上下差（大处已按 SF 行高补齐）；
 - 玻璃材质：电视上不做背后实时模糊，用半透明近似；
-- 局域网发现：Android 模拟器在 NAT 后面收不到宿主机的 mDNS（真机局域网可用）。
+- 局域网发现：Android 模拟器在 NAT 后面收不到宿主机的 mDNS（真机局域网可用）；
+- 页签根页的返回键：tvOS 交给系统（第一下焦点移到侧边栏、再按退到主屏幕）；Android 没有系统侧边栏这一层缓冲，
+  按返回直接就退出了，所以账号 / 搜索根页回首页、首页连按两次才退出（§2）。
 
 **走查里发现、未在本分支修的服务端问题**：服务端直接跑在 macOS 上（`hw=videotoolbox` 本地执行）时，
 不能硬解的片源（如 MPEG-2）仍按硬解装命令，ffmpeg 滤镜阶段报 `-78 Function not implemented`，档 3 转码起不来。
