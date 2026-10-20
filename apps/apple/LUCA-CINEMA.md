@@ -1,6 +1,6 @@
 # Luca Cinema 个人构建与安装记录
 
-基于 MovieClaw v0.38.0 / iOS 0.8.0，当前真机直接安装版本 0.8.0（构建 9）；最近已验证的 TestFlight 为 0.7.0（构建 5），本轮未上传 TestFlight，最低 iOS 26。
+基于 MovieClaw v0.41.0 / iOS 0.9.2，当前真机直接安装版本 0.9.2（构建 10）；最近已验证的 TestFlight 为 0.7.0（构建 5），本轮未上传 TestFlight，最低 iOS 26。
 
 当前订阅接入只在 Web / 电脑助手添加和管理；iOS 读取服务器已有模型，并保留模型与思考强度选择。下方 0.7.0 手机内授权记录属于历史版本，已由本版替代。
 
@@ -149,3 +149,36 @@ NAS 已部署 `local/movieclaw-chatgpt:v0.38.0-20261013`，基于官方 0.38.0 �
 Luca Cinema 0.8.0（9）Archive 成功。主 App 和两个扩展版本一致，签名验证通过，Development profile 包含目标手机，get-task-allow 为 true，App Group 正确；已查看 LC 源图及实际编译图标。CoreDevice 覆盖更新安装到 Silver Sword，回读 0.8.0（9），启动及存活进程确认成功；未卸载或清空 App 数据。本轮未上传 TestFlight，未提交 App Store 审核。当前 sim-use 未识别此目标手机，因此新界面与离线流程的自动化证据来自 Simulator，不能视为真机播放验收。
 
 证据目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Upgrade038-20261013`。最终 Archive、签名和手机安装/回读/启动记录在 `Luca-080-9`；总核验为 `upgrade-verification.json`，界面截图在 `WebManagedShots`。构建 8 是同轮升级的中间安装，已由构建 9 替代。
+
+
+## 0.41.0 / iOS 0.9.2 完整同步与真机更新（2026-10-20）
+
+完整合入稳定版 MovieClaw v0.41.0 / ios-v0.9.2（上游提交 `5b0739f54fc1e22ba2fd9c4037d132d16e85e0c1`），私人合并提交 `ea5e621f`，保留 Luca Cinema 显示名称、LC 图标、独立 Bundle ID、App Group、本机签名与完整许可证。远端 main 也已获取；发布标签后的未发布改动没有混入本版。ChatGPT PR #846 已被上游合并，并随 Server 0.39.0 发布，本次无需额外叠加 ChatGPT 私人补丁。
+
+### NAS
+
+- 从本地 0.38.0 功能镜像升级到官方 `movieclaw/movieclaw:v0.41.0`，运行时 23；仅保留既有的无投递台账外部下载任务隐藏补丁，派生镜像为 `local/movieclaw:v0.41.0-luca-external-20261020`。补丁只修改任务中心可见性，不改变 qB 下载、做种或文件。
+- 官方基础镜像 digest：`sha256:55a558d42451a221e1df9d9226ac75cf9f54db1f3dc71c4c278ee14f9939c58f`。
+- 升级前先做在线 SQLite 备份，在断网隔离容器中完成副本迁移、凭据解密和模型能力检查。随后正常停止 MovieClaw，对整个 data 目录做独立备份，完整性检查为 `ok`，再仅重建 MovieClaw。
+- 完整数据和 compose 备份仅在 NAS `/volume1/docker/movieclaw/upgrade041-20261020/backup`；在线数据库和隔离副本在 NAS `/volume1/docker/movieclaw/data/manual-backups/upgrade041-20261020`。敏感备份目录为 0700，数据库/密钥为 0600，不进入 Git。
+- 生产版本 0.41.0、迁移头 `c5f1a8e3d9b2`、SQLite `quick_check=ok`，容器 healthy、重启次数 0。2 个库、6500 个库文件、466 个媒体条目、2 个供应商前后数量一致，已有供应商凭据解密成功。
+- 已认证 API 返回 11 个模型，GPT-6.1-sol 保留 low / medium / high / xhigh / max。下载任务中心返回 81 个受管任务、0 个 external，下载器 active。qB 容器 ID 与启动时间前后一致，MovieClaw / qB / Plex HTTP 检查均为 200。
+- 本版无转码器协议变更，未更新 Mac 转码器。未重新授权 ChatGPT，未执行消耗额度的模型推理。
+
+### iOS
+
+Luca Cinema 0.9.2（10）Archive 和 App Store Connect 方式 IPA 导出完成；主 App、两个通知扩展和导出包签名、版本、Bundle ID / App Group、设备授权、字体、隐私清单与完整许可证均通过检查。已查看 1024 源图标与归档中的实际编译图标，均为 LC；源图无 Alpha。
+
+按既有要求直接覆盖安装到 the silver sword（iPhone 17 Pro Max），设备读回为 0.9.2（10），启动成功且进程存活。没有卸载或清空数据，本轮未上传 TestFlight。
+
+新增可选 0.5×、0.75×、1×、1.25×、1.5×、2× 倍速，按影片记住速度；自动跳广告与已学习片头；局域网发现、离线入口、AI 输入与 iPad 布局改进均随上游合入。订阅接入继续仅在 Web / 电脑助手管理，iOS 使用服务端模型和思考档位；外层输入框保持单行，展开后显示模型选项。
+
+验证：69 项定向原生测试、7 项依赖锁定测试、本地 Web lint / typecheck 通过。服务端、Web、CLI 与测试代码与上游发布标签一致，完整 Python/Go 等门禁使用发布 PR #945 的成功 CI 记录；未将 CI 跳过项视为通过。本轮真机证据限于安装、版本、签名、启动和进程存活；未实测真机 NAS 播放、画中画、HDR 或离线播放。
+
+### 产物与回退
+
+- 构建及核验目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/Upgrade041-20261020`
+- IPA：`Luca-092-10/Export/LucaCinema-0.9.2-10.ipa`
+- IPA SHA-256：`25b67f7c0a71e8ec8c0606d4845ac90dec4f37d1baae5a53314dae7861fc19e5`
+- 核验：`build-verification.json`、`upgrade-verification.json`、`NativeTests.xcresult` 和 `sword-*.json`
+- 上一版代码：本地备份分支 `backup/luca-before-041-20261020`。旧 Docker 镜像保留。NAS 回退必须停止 MovieClaw、恢复备份 data 与 compose，再启动旧镜像；不能让旧程序直接使用已迁移的新数据库。此回退会丢失升级后的新增数据，尚未执行。
