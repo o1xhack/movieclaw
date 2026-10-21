@@ -1,6 +1,6 @@
 # Luca Cinema 个人构建与安装记录
 
-基于 MovieClaw v0.41.0 / iOS 0.9.2，当前真机直接安装版本 0.9.2（构建 10）；最近已验证的 TestFlight 为 0.7.0（构建 5），本轮未上传 TestFlight，最低 iOS 26。
+基于 MovieClaw v0.41.0 / iOS 0.9.2，最近测试构建 0.9.2（构建 11）已安装 iPhone Air；此前主手机确认版本为 0.9.2（构建 10）；最近已验证的 TestFlight 为 0.7.0（构建 5），本轮未上传 TestFlight，最低 iOS 26。
 
 当前订阅接入只在 Web / 电脑助手添加和管理；iOS 读取服务器已有模型，并保留模型与思考强度选择。下方 0.7.0 手机内授权记录属于历史版本，已由本版替代。
 
@@ -182,3 +182,16 @@ Luca Cinema 0.9.2（10）Archive 和 App Store Connect 方式 IPA 导出完成�
 - IPA SHA-256：`25b67f7c0a71e8ec8c0606d4845ac90dec4f37d1baae5a53314dae7861fc19e5`
 - 核验：`build-verification.json`、`upgrade-verification.json`、`NativeTests.xcresult` 和 `sword-*.json`
 - 上一版代码：本地备份分支 `backup/luca-before-041-20261020`。旧 Docker 镜像保留。NAS 回退必须停止 MovieClaw、恢复备份 data 与 compose，再启动旧镜像；不能让旧程序直接使用已迁移的新数据库。此回退会丢失升级后的新增数据，尚未执行。
+
+
+## 播放画面缩放与 iPhone Air 真机验收（2026-10-21）
+
+通用实现已提交 [上游 PR #972](https://github.com/movieclaw/MovieClaw/pull/972)，功能提交 `19e2a5ad`。个人分支同步 iOS 部分，保留 Luca 品牌、签名及此前的离线观看进度修复。
+
+- 四模式：完整显示（默认）、适应宽度、铺满裁切、拉伸铺满。按钮循环切换，设置与长按菜单可直接选择。只属于当前播放文件，换片/换集恢复默认；同文件旋转与引擎重建保留选择。
+- 字幕独立布局，新增模式按当前可见画面定位，修复暂停后旋转使用旧尺寸的问题；缩放时位图字幕保持比例并移回可见范围。
+- 上游隔离分支的6项iOS定向回归、8项Web定向测试、Web类型检查及改动文件lint通过。Web通过Aside实际播放内置黑边1080p、普通16:9及4:3样片，确认同一video/地址/暂停位置不因模式循环改变。新增Playwright场景未单独执行pytest入口。
+- Luca Cinema 0.9.2（11）开发签名构建和签名校验通过，直接安装至 iPhone Air；设备清单读回版本0.9.2（11）。真机验证默认布局、四模式、直接菜单、保持暂停位置、横竖屏和文字字幕；内置黑边样片按宽放大后左右贴边，并确认暂停旋转后的字幕回到可见画面内。
+- 使用独立测试服务及短样片，没有部署NAS正式Web、修改原片或上传TestFlight。画中画/AirPlay仍由系统布局；烧录字幕仍随画面裁切。
+
+证据与构建：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/DisplayModes-20261021`。
