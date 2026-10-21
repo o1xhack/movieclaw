@@ -11,7 +11,7 @@ App 播本机副本时不走实时进度上报，每次播放记一条观看记�
    不按到达先后）；阈值与实时上报同一个 ``resolve_progress``。
 4. **观看日志**：按 ``viewing_id`` upsert 一行；首次插入时 ``play_count`` +1；
    观看时长取大、且不超过「结束 − 开始 + 2 秒」。
-5. **事件**：「已看」翻转发 ``playback.completed``（时间用记录时间）；开始 / 进度 / 停止只在
+5. **事件**：每次观看首次看完发 ``playback.completed``（时间用记录时间）；开始 / 进度 / 停止只在
    记录是新鲜的（2 分钟内，即在线时的本机播放）时发，补传的旧记录不发，免得落地后一串推送。
    不碰实时会话（``activity``）与 ``end_session``：前者会造出假的「正在播放」，后者会掐断
    这台设备正在进行的取流。
@@ -169,6 +169,7 @@ async def _apply_one(
     first_time = log is None
     if (
         log is not None
+        and not (record.completed and not log.completed)
         and (log.ended_at is not None or not record.ended)
         and (updated <= log.last_seen_at or log.end_position_ms == record.position_ms)
     ):
@@ -211,9 +212,14 @@ async def _apply_one(
     if first_time:
         # 计数点与实时上报一样放在「开始」：这次播放第一次到达服务器时 +1
         row.play_count = (row.play_count or 0) + 1
-    newly_played = False
+    # 一次观看是否完成与当前续播状态分开：重看、比另一台设备更早的补传也要发完成事件。
+    viewing_completed = resolve_progress(
+        None if record.completed else record.position_ms,
+        runtime_ms,
+        currently_played=False,
+    ).played
+    newly_completed = viewing_completed and not log.completed
     if newer:
-        was_played = row.played
         outcome = resolve_progress(
             None if record.completed else record.position_ms,
             runtime_ms,
@@ -222,7 +228,6 @@ async def _apply_one(
         row.position_ms = outcome.position_ms
         row.played = outcome.played
         row.updated_at = updated
-        newly_played = outcome.played and not was_played
     if row.last_played_at is None or updated > row.last_played_at:
         row.last_played_at = updated
 
@@ -232,18 +237,18 @@ async def _apply_one(
             log.end_position_ms = record.position_ms
         log.watched_ms = max(log.watched_ms, watched)
         log.updated_at = clock.now
-    log.completed = log.completed or newly_played or record.completed
+    log.completed = log.completed or viewing_completed
     if record.ended:
         log.ended_at = updated
 
     events: list = []
     if fresh and first_time:
         events.append(PLAYBACK_STARTED)
-    if newly_played:
+    if newly_completed:
         events.append(PLAYBACK_COMPLETED)
     if fresh and record.ended:
         events.append(PLAYBACK_STOPPED)
-    elif fresh and not first_time and not newly_played:
+    elif fresh and not first_time and not newly_completed:
         events.append(PLAYBACK_PROGRESS)
     for event in events:
         await playback_events.publish_playback(
@@ -255,7 +260,9 @@ async def _apply_one(
             client=client,
             duration_ms=runtime_ms,
             file_id=file_id or record.file_id,
-            completed=newly_played,
+            completed=newly_completed,
+            position_ms=record.position_ms,
+            viewing_id=record.viewing_id,
             occurred_at=started if event is PLAYBACK_STARTED else updated,
         )
     return "applied" if newer else "stale"

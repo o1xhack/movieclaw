@@ -508,6 +508,7 @@ async def record_progress(
                 duration_ms=runtime_ms,
                 file_id=file_id,
                 completed=newly_played,
+                position_ms=position_ms if position_ms is not None else runtime_ms,
             )
     await session.commit()
     return row
