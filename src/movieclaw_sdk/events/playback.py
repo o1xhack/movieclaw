@@ -20,6 +20,8 @@ class Playback(Frozen):
     played: bool = False
     play_count: int = 0
     client: ClientRef | None = None
+    viewing_id: str | None = None
+    """本机播放记录编号；补传快照共享此编号。流式播放为 None。"""
 
 
 class PlaybackStopped(Playback):

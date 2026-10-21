@@ -928,3 +928,173 @@ def test_queued_export_says_what_it_is_waiting_for(client, tmp_path) -> None:
     finally:
         manager._queue.clear()
         manager._current_id = None
+
+
+@pytest.fixture
+def playback_emissions(monkeypatch):
+    import inspect
+
+    from movieclaw_api import events
+
+    captured = []
+
+    async def publish(session, event, build, *, occurred_at=None):
+        if not event.name.startswith("playback."):
+            return
+        value = build()
+        if inspect.isawaitable(value):
+            value = await value
+        if value is not None:
+            captured.append((event.name, value, occurred_at))
+
+    monkeypatch.setattr(events, "publish", publish)
+    return captured
+
+
+@pytest.mark.parametrize("completed,position", [(True, 0), (False, 570_000)])
+def test_offline_rewatches_each_emit_one_completion_at_real_time(
+    client, tmp_path, playback_emissions, completed, position
+):
+    _lib, item, file = seed(client, tmp_path, real=False)
+    records = []
+    for n in range(2):
+        when = datetime.now(UTC) - timedelta(hours=5 - n)
+        records.append(
+            _viewing(
+                item,
+                viewing_id=f"rewatch-{n}",
+                file_id=file,
+                started_at=(when - timedelta(minutes=10)).isoformat(),
+                updated_at=when.isoformat(),
+                position_ms=position,
+                completed=completed,
+                ended=True,
+                watched_ms=570_000,
+            )
+        )
+    _send_viewings(client, records)
+    done = [e for e in playback_emissions if e[0] == "playback.completed"]
+    assert len(done) == 2  # 每次观看，而不是仅「整部未看→已看」的第一次
+    assert all(e[1].position_ms == position and e[1].played for e in done)
+    for event, record in zip(done, records, strict=True):
+        original = datetime.fromisoformat(record["updated_at"]).replace(tzinfo=None)
+        assert abs((event[2] - original).total_seconds()) < 5
+    assert not any(e[0] in ("playback.started", "playback.stopped") for e in playback_emissions)
+    playback_emissions.clear()
+    _send_viewings(client, records)
+    assert playback_emissions == []  # 确认丢失后的重复补传不重复触发
+    assert len(_logs(client, item)) == 2
+
+
+def test_older_completed_viewing_emits_without_rewinding_newer_progress(
+    client, tmp_path, playback_emissions
+):
+    _lib, item, file = seed(client, tmp_path, real=False)
+    client.post(f"{_API}/playback/progress", json={"media_item_id": item, "event": "start"})
+    client.post(
+        f"{_API}/playback/progress",
+        json={
+            "media_item_id": item,
+            "event": "stop",
+            "position_ms": 300_000,
+        },
+    )
+    playback_emissions.clear()
+    when = datetime.now(UTC) - timedelta(days=1)
+    record = _viewing(
+        item,
+        file_id=file,
+        viewing_id="completed-before-newer-viewing",
+        started_at=(when - timedelta(minutes=10)).isoformat(),
+        updated_at=when.isoformat(),
+        position_ms=0,
+        completed=True,
+        ended=True,
+    )
+    assert _send_viewings(client, [record]) == {record["viewing_id"]: "stale"}
+    assert _state(client, item).position_ms == 300_000
+    assert [e[0] for e in playback_emissions] == ["playback.completed"]
+
+
+def test_completed_snapshot_then_end_snapshot_does_not_emit_completion_twice(
+    client, tmp_path, playback_emissions
+):
+    _lib, item, file = seed(client, tmp_path, real=False)
+    when = datetime.now(UTC) - timedelta(hours=5)
+    record = _viewing(
+        item,
+        file_id=file,
+        viewing_id="finish-in-progress",
+        started_at=(when - timedelta(minutes=10)).isoformat(),
+        updated_at=when.isoformat(),
+        position_ms=570_000,
+        completed=True,
+        ended=False,
+    )
+    _send_viewings(client, [record])
+    playback_emissions.clear()
+    _send_viewings(
+        client,
+        [
+            {
+                **record,
+                "ended": True,
+                "updated_at": (when + timedelta(seconds=30)).isoformat(),
+                "position_ms": 600_000,
+            }
+        ],
+    )
+    assert playback_emissions == []
+
+
+@pytest.mark.parametrize("position", [10_000, 570_000, None])
+def test_live_playback_events_keep_raw_position_after_resume_normalization(
+    client, tmp_path, playback_emissions, position
+):
+    _lib, item, file = seed(client, tmp_path, real=False)
+    for _attempt in range(2):
+        client.post(
+            f"{_API}/playback/progress",
+            json={
+                "media_item_id": item,
+                "event": "start",
+                "file_id": file,
+            },
+        )
+        playback_emissions.clear()
+        client.post(
+            f"{_API}/playback/progress",
+            json={
+                "media_item_id": item,
+                "event": "stop",
+                "position_ms": position,
+                "file_id": file,
+            },
+        )
+        stopped = next(e[1] for e in playback_emissions if e[0] == "playback.stopped")
+        assert stopped.position_ms == (position if position is not None else 600_000)
+        assert _state(client, item).position_ms == 0
+
+
+def test_completion_flag_upgrade_is_not_lost_when_position_was_already_zero(
+    client, tmp_path, playback_emissions
+):
+    _lib, item, file = seed(client, tmp_path, real=False)
+    when = datetime.now(UTC) - timedelta(hours=5)
+    record = _viewing(
+        item,
+        file_id=file,
+        viewing_id="zero-position-upgrade",
+        started_at=(when - timedelta(minutes=10)).isoformat(),
+        updated_at=when.isoformat(),
+        position_ms=0,
+        completed=False,
+        ended=True,
+    )
+    _send_viewings(client, [record])
+    playback_emissions.clear()
+    _send_viewings(
+        client,
+        [{**record, "completed": True, "updated_at": (when + timedelta(seconds=1)).isoformat()}],
+    )
+    assert [e[0] for e in playback_emissions] == ["playback.completed"]

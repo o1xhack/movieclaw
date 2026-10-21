@@ -56,6 +56,8 @@ async def publish_playback(
     file_id: int | None = None,
     completed: bool = False,
     occurred_at: datetime | None = None,
+    position_ms: int | None = None,
+    viewing_id: str | None = None,
 ) -> None:
     """开始 / 停止 / 看完 / 进度：``state`` 是这次上报落库后的观看状态行。
 
@@ -73,11 +75,13 @@ async def publish_playback(
             "media": media,
             "unit": event_refs.unit(unit[1], unit[2]),
             "file_id": file_id,
-            "position_ms": state.position_ms,
+            # 续播点会在不足 5% / 已看完时归零；事件应保留播放器的实际读数。
+            "position_ms": position_ms if position_ms is not None else state.position_ms,
             "duration_ms": duration_ms,
             "played": bool(state.played),
             "play_count": state.play_count or 0,
             "client": client_ref(client),
+            "viewing_id": viewing_id,
         }
         if payload_type is PlaybackStopped:
             fields["completed"] = completed
