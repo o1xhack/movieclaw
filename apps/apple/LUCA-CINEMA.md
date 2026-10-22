@@ -195,3 +195,13 @@ Luca Cinema 0.9.2（10）Archive 和 App Store Connect 方式 IPA 导出完成�
 - 使用独立测试服务及短样片，没有部署NAS正式Web、修改原片或上传TestFlight。画中画/AirPlay仍由系统布局；烧录字幕仍随画面裁切。
 
 证据与构建：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw/DisplayModes-20261021`。
+
+
+### 2026-10-21：按上游反馈精简播放缩放（build 12）
+
+- 三模式：完整显示、铺满裁切、拉伸铺满；移除适应宽度和顶栏常驻按钮，现有设置菜单可选三种模式。
+- iOS 捏合放大进入铺满裁切、捏合缩小恢复完整显示；设置菜单关闭后仍能捏合。
+- 本次播放器内同剧自动连播、选集与换版本保留模式，切换影片或重新进入恢复默认。
+- 保留原来的根 AVPlayerLayer 结构，仅切换 videoGravity，减少旋转时的图层尺寸风险。
+- Air 已安装并运行 0.9.2 (12)：验证捏合、三模式、自动 S01E01 → S01E02 保留铺满，以及暂停时横竖屏保留模式/进度。
+- 上游 PR #972 更新至 b50f7e22；Web 的 ASS 定位与 worker 修复位于独立上游 worktree，未改私有 Web。既有离线进度修复保持。
