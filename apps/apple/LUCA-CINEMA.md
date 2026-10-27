@@ -207,3 +207,11 @@ Luca Cinema 0.9.2（10）Archive 和 App Store Connect 方式 IPA 导出完成�
 - 上游 PR #972 更新至 b50f7e22；Web 的 ASS 定位与 worker 修复位于独立上游 worktree，未改私有 Web。既有离线进度修复保持。
 
 暂停旋转补充：普通完整显示也统一采用当前容器与片源显示比例计算字幕位置，修复暂停从横屏转竖屏后仍沿用旧 videoRect、字幕偏右裁切的问题。Air 复测完整显示的字幕边界为 [126,535,168,16]，位于竖屏视频区域内，暂停位置不变。对应上游 f70a1767。
+
+## MovieClaw 0.43.0 与 Luca Cinema iOS 0.11.0（13）TestFlight（2026-10-26）
+
+NAS 从应用 overlay 0.42.0 / 定制 runtime 23 镜像升级到官方 0.43.0 runtime 24 镜像基线。镜像 `local/movieclaw:v0.43.0-preserved-20261026` 在官方镜像上保留了私人部署的外部下载任务过滤，以及离线观看完成事件/续播位置修补；Compose 仅重建 MovieClaw。原 Compose、镜像和 0.42.0 overlay 留作回退。升级前停服归档位于 NAS `/volume1/docker/movieclaw/upgrade-20261026/data-critical-pre-v043.tar`（约 1.1 GB，含数据库、配置、更新记录；未重复归档缓存、元数据、转码、日志及既有备份，这些目录仍留在原数据卷）。恢复旧镜像时须同时恢复升级前数据库和 Compose，不能直接用迁移后的数据库回退。启动后 `/api/v1/health` 报 0.43.0、首页与健康接口均为 200、容器 `healthy` 且重启次数为 0；生产数据库 `quick_check=ok`。
+
+私人 `luca-cinema-chatgpt` 分支合入上游 `origin/main` 的 `6dc217dc`，合并提交 `ae153ceb`，品牌生成文件提交 `96761167` 并推送到 `o1xhack/movieclaw`。保留 Luca Cinema 名称、LC 图标、独立 Bundle ID 与签名配置、播放器和离线观看改动；上游 iOS 版本更新至 0.11.0。离线观看完成事件相关 5 个定向用例通过，Xcode 27.1 Release 归档与严格签名校验通过。归档主 App 为 `com.o1xhack.lucacinema.app`、0.11.0（13），通知扩展 ID 同属该前缀，设备族包含 iPhone / iPad。源图 1024×1024 无 Alpha，归档 120×120 图标已查看且像素完全不透明，Apple CDN 图标回读也为 LC。
+
+2026-10-26 本地 22:37 上传；ASC upload/build ID `50f88daf-2403-43b3-b19a-eb170c4a349d` 最终为 `COMPLETE` / `VALID`，pre-release train 为 iOS 0.11.0，`internalBuildState=IN_BETA_TESTING`，现有内部组 `Luca Personal` 含此构建（all-builds）。未提交 App Store 审核，也未加入外部测试组。构建、导出日志、归档及图标核验文件位于 `/Volumes/StudioSSD/Developer/BuildScratch/LucaCinema/ios-v0.11.0-build13`。真实 iPhone 安装与播放仍需单独 QA。
