@@ -12,15 +12,15 @@ struct OpenSourceComponent: Identifiable {
 
     static let all: [OpenSourceComponent] = [
         .init(name: "MovieClaw（Luca Cinema 基于此项目修改）", license: "修改版 Apache-2.0，附非商业限制",
-              source: "https://github.com/movieclaw/MovieClaw/tree/v0.37.0",
+              source: "https://github.com/movieclaw/MovieClaw",
               licenseFiles: ["License-MovieClaw"]),
-        .init(name: "AetherEngine（MovieClaw 修改版）", license: "LGPL-3.0，附 App Store 例外",
+        .init(name: String(localized: .settingsAboutEngineName), license: String(localized: .settingsAboutEngineLicense),
               source: AetherEngineDependency.sourceURL,
               licenseFiles: ["License-AetherEngine", "License-GPL-3.0"]),
-        .init(name: "FFmpeg", license: "LGPL-2.1 或更新版本",
+        .init(name: "FFmpeg", license: String(localized: .settingsAboutFfmpegLicense),
               source: "https://github.com/superuser404notfound/FFmpegBuild",
               licenseFiles: ["License-LGPL-2.1"]),
-        .init(name: "libzvbi", license: "LGPL-2.1（ure.c 为 MIT）",
+        .init(name: "libzvbi", license: String(localized: .settingsAboutLibzvbiLicense),
               source: "https://github.com/superuser404notfound/FFmpegBuild",
               licenseFiles: ["License-LGPL-2.1", "License-libzvbi-ure"]),
         .init(name: "dav1d", license: "BSD-2-Clause",
@@ -35,7 +35,7 @@ struct OpenSourceComponent: Identifiable {
         .init(name: "Nuke", license: "MIT",
               source: "https://github.com/kean/Nuke",
               licenseFiles: ["License-Nuke"]),
-        .init(name: "思源宋体（Noto Serif SC，欢迎页子集）", license: "SIL Open Font License 1.1",
+        .init(name: String(localized: .settingsAboutWelcomeFont), license: "SIL Open Font License 1.1",
               source: "https://github.com/notofonts/noto-cjk",
               licenseFiles: ["OFL"]),
     ]

@@ -108,6 +108,16 @@ class ClientCapability:
     #: 码流却标着 BT.2020 YCbCr HDR 的片照常给原文件，它自己只放基础层。不申报的不给原文件直出
     #: （``MediaProfile.dolby_vision_ignored``）
     dolby_vision_record_audit: bool = False
+    #: 直出 MP4 / MOV 原文件时播放器在内存里建得下的样本表（各轨样本数合计）。ExoPlayer 解析 moov
+    #: 时把每条轨（没选中的也算）每个样本的偏移、大小、时间戳都建进 Java 堆；TrueHD 每秒 1200 个
+    #: 样本，两个多小时的电影光这一条轨就三百多 MB，再加播放缓冲就把堆撑爆（#962）。超出的给换封装。
+    #: None = 不受限（老客户端、Apple 的自研引擎）
+    mp4_sample_limit: int | None = None
+    #: 硬件转码时能接 HEVC 输出（fMP4、hvc1、8-bit Main），且播放器实现了「HEVC 放不了就不带
+    #: 它重来、不把硬件档记成失败」的回退（#1008）。同画质码率约为 H.264 的三分之二；还要
+    #: ``video`` 里有 HEVC、高度够。老客户端不带 = 一律 H.264：它们把 HEVC 解不了当作硬件档
+    #: 失败，会直接降到软件转码
+    hevc_transcode: bool = False
 
     @property
     def uses_native_hls_player(self) -> bool:

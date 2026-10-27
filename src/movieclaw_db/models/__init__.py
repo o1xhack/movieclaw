@@ -86,6 +86,7 @@ from movieclaw_db.models.site_user_profile import SiteUserProfile
 from movieclaw_db.models.smart_subscription import (
     SmartCandidate,
     SmartDecisionRecord,
+    SmartMemoryRow,
     SmartProfile,
     SmartSeason,
 )
@@ -103,6 +104,7 @@ from movieclaw_db.models.subscription_activity import ActivityType, Subscription
 from movieclaw_db.models.subtitle_auto_mute import SubtitleAutoMute
 from movieclaw_db.models.system_notice import NoticeSeverity, NoticeStatus, SystemNotice
 from movieclaw_db.models.tip import TipEvent, TipRecord
+from movieclaw_db.models.watch_record import WatchRecord
 
 __all__ = [
     "TimestampMixin",
@@ -172,6 +174,7 @@ __all__ = [
     "PlaybackMetric",
     "PlaybackPreference",
     "PlaybackState",
+    "WatchRecord",
     "PluginCallback",
     "PluginData",
     "MediaSeason",
@@ -185,6 +188,7 @@ __all__ = [
     "ReelEvent",
     "RuleSet",
     "Subscription",
+    "SmartMemoryRow",
     "SmartProfile",
     "SmartCandidate",
     "SmartDecisionRecord",

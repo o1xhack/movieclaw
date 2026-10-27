@@ -20,15 +20,20 @@ from movieclaw_api.exceptions import (
     NotFoundException,
     UpstreamServiceException,
 )
+from movieclaw_api.i18n import t
+from movieclaw_api.i18n.labels import language_name
+from movieclaw_api.i18n.stored import reference, render_value
 from movieclaw_api.schemas.response import ApiResponse, ok
 from movieclaw_api.schemas.subscription import (
     ActivityView,
     DispatchPreviewView,
     DoubanEpisodesView,
     DownloadUnitView,
+    EpisodeCapSpec,
     EpisodeHintDismissPayload,
     EpisodeHintView,
     EpisodeSeasonView,
+    EpisodeWindowView,
     GrabPayload,
     GrabResultView,
     MediaBrief,
@@ -41,6 +46,17 @@ from movieclaw_api.schemas.subscription import (
     SearchNowView,
     SeasonCleanupPayload,
     SeasonOverview,
+    SmartDefaultsPayload,
+    SmartDefaultsView,
+    SmartHabitView,
+    SmartLanguageOptionView,
+    SmartLanguageView,
+    SmartMemoryPatch,
+    SmartMemoryView,
+    SmartPlanView,
+    SmartQuestionView,
+    SmartScopeOptionView,
+    SmartSubtitleView,
     SubscriptionCreatePayload,
     SubscriptionCreateView,
     SubscriptionDeleteView,
@@ -67,6 +83,12 @@ from movieclaw_api.services.subscription import (
     forecast_refresh_pending,
     recent_arrivals,
 )
+from movieclaw_api.services.subscription.episode_cap import (
+    EpisodeCap,
+    caps_of,
+    season_episode_max_many,
+    windows_of,
+)
 from movieclaw_api.services.subscription.episode_floor import (
     floors_of,
     pending_hints,
@@ -74,6 +96,11 @@ from movieclaw_api.services.subscription.episode_floor import (
     season_episode_max,
     set_douban_ref,
     tracks_season,
+)
+from movieclaw_api.services.subscription.smart_memory import SmartChoice
+from movieclaw_api.services.subscription.smart_presentation import (
+    selection_presentation,
+    smart_presentation,
 )
 from movieclaw_api.services.subscription.smart_profiles import save_profile
 from movieclaw_api.services.title_discovery import (
@@ -103,8 +130,13 @@ async def get_smart_profile(
     kind: Literal["movie", "tv"], session: AsyncSession = Depends(get_session)
 ):
     row = await session.get(SmartProfile, kind)
-    return ok({"kind": kind, "revision": row.revision if row else 0,
-               "preferences": row.preferences if row else None})
+    return ok(
+        {
+            "kind": kind,
+            "revision": row.revision if row else 0,
+            "preferences": row.preferences if row else None,
+        }
+    )
 
 
 @router.put(
@@ -119,6 +151,239 @@ async def put_smart_profile(
 ):
     row = await save_profile(session, kind, payload.preferences, payload.revision)
     return ok({"kind": kind, "revision": row.revision, "preferences": row.preferences})
+
+
+def _wait_reference(seconds: int) -> dict:
+    if seconds == 0:
+        return reference("subscription.smart.asap")
+    if seconds % 86400 == 0:
+        return reference("subscription.smart.waitDays", count=seconds // 86400)
+    return reference("subscription.smart.waitHours", count=seconds // 3600)
+
+
+async def _smart_plan_view(
+    session: AsyncSession, item: MediaItem, *, is_admin: bool
+) -> SmartPlanView:
+    from movieclaw_api.services.subscription.smart_memory import plan_for
+
+    plan = await plan_for(session, item)
+    resolved, prefs = plan.resolved, plan.prefs
+    if resolved is None or prefs is None or plan.profile is None:
+        return SmartPlanView(
+            configured=False, memory_revision=plan.memory.revision, can_edit=is_admin
+        )
+    language = resolved.subtitle_language
+    rendered = smart_presentation(resolved)
+    wait = reference(
+        "subscription.smart.waitPlan",
+        wait=_wait_reference(prefs.wait_seconds),
+        upgrade="yes" if prefs.allow_upgrade else "no",
+        strict="yes" if prefs.strict_resolution else "no",
+        resolution="4K" if resolved.resolution == "2160p" else "1080p",
+    )
+    return SmartPlanView(
+        configured=True,
+        profile_revision=plan.profile.revision,
+        memory_revision=plan.memory.revision,
+        resolution=resolved.resolution,
+        source=resolved.source,
+        quality_label=rendered["quality_label"],
+        quality_note=rendered["quality_note"],
+        quality_shadow=rendered["quality_shadow"],
+        wait_label=render_value(wait),
+        subtitle_language=language,
+        subtitle_language_label=language_name(language) if language else None,
+        subtitle_understood=None if language is None else not resolved.watchable_languages,
+        subtitle_line=rendered["subtitle_line"],
+        question=SmartQuestionView(**rendered["question"])
+        if resolved.question and is_admin
+        else None,
+        subtitle_edit_question=SmartQuestionView(
+            language=language,
+            prompt=t("subscription.smart.editLanguageQuestion", language=language_name(language)),
+            subtitles_label=t(
+                "subscription.smart.requireSubtitles",
+                acceptable=t("media.language.or").join(
+                    language_name(code) for code in resolved.watchable_languages
+                ),
+            )
+            if resolved.watchable_languages
+            else t("subscription.smart.genericRequireSubtitles"),
+            understood_label=t(
+                "subscription.smart.understoodAnswer", language=language_name(language)
+            ),
+        )
+        if language and is_admin
+        else None,
+        scope_options=[SmartScopeOptionView(**o) for o in rendered["scope_options"]],
+        can_edit=is_admin,
+    )
+
+
+@router.get(
+    "/smart-defaults",
+    response_model=ApiResponse[SmartDefaultsView],
+    dependencies=[Depends(require_admin)],
+    operation_id="subscriptions.get-smart-defaults",
+)
+async def get_smart_defaults(session: AsyncSession = Depends(get_session)):
+    """智能设置（一套）：画质、洗版、最低要求共用，等待时间电影和剧集各一个。"""
+    movie = await session.get(SmartProfile, "movie")
+    tv = await session.get(SmartProfile, "tv")
+    base = (movie or tv).preferences if (movie or tv) else {}
+    shared = SmartPreferences.model_validate(base) if base else SmartPreferences()
+    return ok(
+        SmartDefaultsView(
+            configured=movie is not None and tv is not None,
+            movie_revision=movie.revision if movie else 0,
+            tv_revision=tv.revision if tv else 0,
+            resolution=shared.resolution,
+            source=shared.source,
+            allow_upgrade=shared.allow_upgrade,
+            strict_resolution=shared.strict_resolution,
+            movie_wait_seconds=movie.preferences["wait_seconds"] if movie else 86400,
+            tv_wait_seconds=tv.preferences["wait_seconds"] if tv else 10800,
+        )
+    )
+
+
+@router.put(
+    "/smart-defaults",
+    response_model=ApiResponse[SmartDefaultsView],
+    dependencies=[Depends(require_admin)],
+    operation_id="subscriptions.save-smart-defaults",
+)
+async def put_smart_defaults(
+    payload: SmartDefaultsPayload, session: AsyncSession = Depends(get_session)
+):
+    from movieclaw_api.services.subscription.smart_profiles import save_defaults
+
+    shared = SmartPreferences(
+        resolution=payload.resolution,
+        source=payload.source,
+        allow_upgrade=payload.allow_upgrade,
+        strict_resolution=payload.strict_resolution,
+        wait_seconds=payload.movie_wait_seconds,
+    )
+    await save_defaults(
+        session,
+        shared,
+        movie_wait_seconds=payload.movie_wait_seconds,
+        tv_wait_seconds=payload.tv_wait_seconds,
+        movie_revision=payload.movie_revision,
+        tv_revision=payload.tv_revision,
+    )
+    return await get_smart_defaults(session)
+
+
+async def _memory_view(session: AsyncSession) -> SmartMemoryView:
+    from movieclaw_api.services.subscription.smart_memory import load_memory
+    from movieclaw_matcher.smart_memory import (
+        COMMON_LANGUAGES,
+        DEFAULT_UNDERSTOOD,
+        quality_reference,
+    )
+
+    memory = await load_memory(session)
+    understood = [a for a in memory.languages if a.understood and a.key != DEFAULT_UNDERSTOOD]
+    keys = {DEFAULT_UNDERSTOOD, *(a.key for a in understood)}
+
+    def habit_quality(h) -> str:
+        if h.resolution and h.source:
+            return render_value(quality_reference(h.resolution, h.source))
+        return {
+            "2160p": "4K",
+            "1080p": "1080p",
+            "web-dl": "WEB-DL",
+            "blu-ray": t("subscription.smart.bluray"),
+            "remux": "Remux",
+        }[h.resolution or h.source]
+
+    return SmartMemoryView(
+        revision=memory.revision,
+        languages=[
+            SmartLanguageView(
+                key=DEFAULT_UNDERSTOOD, label=language_name(DEFAULT_UNDERSTOOD), removable=False
+            ),
+            *(
+                SmartLanguageView(
+                    key=a.key, label=language_name(a.key), source_title=a.source_title
+                )
+                for a in sorted(understood, key=lambda a: a.at.timestamp() if a.at else 0.0)
+            ),
+        ],
+        addable_languages=[
+            SmartLanguageOptionView(key=k, label=language_name(k))
+            for k in COMMON_LANGUAGES
+            if k not in keys
+        ],
+        habits=[
+            SmartHabitView(
+                key=h.key,
+                label=render_value(h.label_message),
+                quality_label=habit_quality(h),
+                source_title=h.source_title,
+            )
+            for h in memory.habits
+            if h.resolution or h.source
+        ],
+    )
+
+
+@router.get(
+    "/smart-memory",
+    response_model=ApiResponse[SmartMemoryView],
+    dependencies=[Depends(require_admin)],
+    operation_id="subscriptions.get-smart-memory",
+)
+async def get_smart_memory(session: AsyncSession = Depends(get_session)):
+    """智能订阅记住的东西：看得懂的语言、按地区/平台/类型的画质习惯。"""
+    return ok(await _memory_view(session))
+
+
+@router.patch(
+    "/smart-memory",
+    response_model=ApiResponse[SmartMemoryView],
+    dependencies=[Depends(require_admin)],
+    operation_id="subscriptions.update-smart-memory",
+)
+async def patch_smart_memory(
+    payload: SmartMemoryPatch, session: AsyncSession = Depends(get_session)
+):
+    """设一种语言看不看得懂，或删一条画质习惯。新订阅和还在等的订阅立即按新的来。"""
+    from movieclaw_api.services.subscription.smart_memory import (
+        apply_to_subscriptions,
+        load_memory,
+        store_memory,
+    )
+    from movieclaw_api.services.subscription.smart_profiles import conflict
+    from movieclaw_db.models.base import utcnow
+    from movieclaw_matcher.smart_memory import DEFAULT_UNDERSTOOD, LANGUAGE_LABELS
+
+    memory = await load_memory(session)
+    if payload.revision != memory.revision:
+        raise conflict()
+    if payload.language is not None:
+        key = payload.language.casefold()
+        if key == DEFAULT_UNDERSTOOD:
+            raise BadRequestException(message_key="errors.subscription.chineseRequired")
+        if key not in LANGUAGE_LABELS:
+            raise BadRequestException(message_key="errors.subscription.languageUnsupported")
+        current = next((a for a in memory.languages if a.key == key), None)
+        updated = memory.with_language(
+            key,
+            bool(payload.understood),
+            source_title=current.source_title if current else None,
+            at=utcnow(),
+        )
+    else:
+        if not any(h.key == payload.remove_habit for h in memory.habits):
+            raise NotFoundException(message_key="errors.subscription.habitMissing")
+        updated = memory.without_habit(payload.remove_habit)
+    await store_memory(session, updated, memory.revision)
+    await apply_to_subscriptions(session)
+    await session.commit()
+    return ok(await _memory_view(session))
 
 
 class SmartWaitPayload(BaseModel):
@@ -144,9 +409,9 @@ async def update_smart_wait(
     )
     row = await session.get(WantedItem, wanted_id)
     if row is None or row.subscription_id != subscription_id:
-        raise NotFoundException("没有找到该单集")
+        raise NotFoundException(message_key="errors.subscription.episodeMissing")
     if bool(payload.extend_seconds) == bool(payload.candidate_key):
-        raise BadRequestException("请选择立即下载或延长等待其中一项")
+        raise BadRequestException(message_key="errors.subscription.waitActionRequired")
     from movieclaw_api.services.subscription.smart_selection import change_wait
 
     result = await change_wait(
@@ -158,8 +423,13 @@ async def update_smart_wait(
     )
     if payload.candidate_key:
         from movieclaw_api.services.subscription.smart_scheduler import evaluate_requested
+
         background_tasks.add_task(evaluate_requested, subscription_id)
+    result["selection_state"] = selection_presentation(
+        result["selection_state"], row.selection_messages
+    )
     return ok(result)
+
 
 # 权限分层（docs/design/member-management.md §2.2/§3.2）：
 # - 读（列表/详情/时间线）：登录即可（路由器挂载时已注入 require_login）；
@@ -213,13 +483,25 @@ async def _detail_view(
         # 占位集（超出 TMDB 的）在追踪明细里如实标出
         known_max = await season_episode_max(session, item.id)
         floors = floors_of(sub)
-        view.episode_seasons = [
-            EpisodeSeasonView(
-                season_number=season, tmdb_count=known_max.get(season, 0), floor=floors.get(season)
+        caps = caps_of(sub)
+
+        def _season_view(season: int) -> EpisodeSeasonView:
+            window = caps.get(season)
+            return EpisodeSeasonView(
+                season_number=season,
+                tmdb_count=known_max.get(season, 0),
+                floor=floors.get(season),
+                window=None
+                if window is None
+                else EpisodeCapSpec(start=window.start, end=window.end),
             )
+
+        view.episode_seasons = [
+            _season_view(season)
             for season in sorted(set(known_max) | set(floors))
             if season != 0 and tracks_season(sub, season)
         ]
+        view.episode_windows = _window_views(sub, known_max)
         view.episode_hints = [
             EpisodeHintView(
                 season_number=hint.season_number,
@@ -237,6 +519,7 @@ async def _detail_view(
     if sub.selection_mode == "smart":
         from movieclaw_api.services.subscription.smart_profiles import read_policy
         from movieclaw_api.services.subscription.smart_runtime import runtime_settings
+
         runtime = await runtime_settings()
         policy = read_policy(sub)
         view.smart_status = (
@@ -250,7 +533,43 @@ async def _detail_view(
         )
         if policy is None:
             view.smart_policy = None
+        else:
+            from movieclaw_api.services.subscription.smart_memory import resolve_subscription
+
+            solved = await resolve_subscription(session, sub)
+            if solved is not None:
+                resolved, _policy = solved
+                rendered = smart_presentation(resolved)
+                view.smart_quality_note = rendered["quality_note"]
+                if resolved.subtitle_language and resolved.subtitle_line:
+                    view.smart_subtitle = SmartSubtitleView(
+                        language=resolved.subtitle_language,
+                        language_label=language_name(resolved.subtitle_language),
+                        line=rendered["subtitle_line"],
+                        understood=not resolved.watchable_languages,
+                    )
     return view
+
+
+def _cap_windows(
+    payload_caps: dict[int, EpisodeCapSpec] | None,
+) -> dict[int, EpisodeCap] | None:
+    """接口载荷的窗口 {季号: EpisodeCapSpec} 转成服务层的 {季号: EpisodeCap}。
+
+    None 原样返回（=「不传，不变」），``{}`` 原样返回（=「清除」）。
+    """
+    if payload_caps is None:
+        return None
+    return {season: EpisodeCap(spec.start, spec.end) for season, spec in payload_caps.items()}
+
+
+def _window_views(sub: Subscription, known_max: dict[int, int]) -> list[EpisodeWindowView] | None:
+    """被订阅上限截断的季；没有被截断的季返回 None（与「没设上限」同一形态）。"""
+    windows = windows_of(sub, known_max)
+    return [
+        EpisodeWindowView(season_number=w.season_number, start=w.start, end=w.end, total=w.total)
+        for w in windows
+    ] or None
 
 
 def _can_manage(principal: Principal, sub: Subscription) -> bool:
@@ -270,6 +589,7 @@ async def _prepare_resolved_target(
     service: SubscriptionService,
     session: AsyncSession,
     suggested_season: int | None = None,
+    is_admin: bool = False,
 ) -> PrepareView:
     """把已消歧的目标投影成订阅表单需要的季集、库存与现有订阅状态。"""
     item, seasons, existing = await service.prepare(kind, tmdb_id, douban_id=douban_id)
@@ -289,6 +609,7 @@ async def _prepare_resolved_target(
         aired_by_season[season_number] = aired_by_season.get(season_number, 0) + 1
     return PrepareView(
         status="ready",
+        smart=await _smart_plan_view(session, item, is_admin=is_admin),
         media=MediaBrief.from_model(
             item, (await local_media_files(session, [item.id])).get(item.id)
         ),
@@ -352,6 +673,7 @@ async def _preview_title_ref(
     *,
     service: SubscriptionService,
     session: AsyncSession,
+    is_admin: bool = False,
 ) -> PrepareView:
     """解析 Discover 引用并完成订阅目标预览，不把来源组合规则泄漏给调用方。"""
     try:
@@ -364,12 +686,13 @@ async def _preview_title_ref(
                 douban_id=None,
                 service=service,
                 session=session,
+                is_admin=is_admin,
             )
 
         details = await get_title_discovery_service().get_title_details(title_ref)
         kind = details.title.media_type
         if kind is None:
-            raise BadRequestException("豆瓣条目缺少电影/剧集类型，暂时无法创建订阅")
+            raise BadRequestException(message_key="errors.subscription.doubanKindMissing")
         library = MediaLibraryService(session, get_tmdb_client())
         # 别名与首播日期是收敛证据：豆瓣把剧集按季拆条目，只有靠它们才能把
         # 「中餐厅 第十季」对上 TMDB 的《中餐厅》S10。详情本来就已拉回，不额外请求
@@ -404,6 +727,7 @@ async def _preview_title_ref(
         suggested_season=resolution.suggested_season,
         service=service,
         session=session,
+        is_admin=is_admin,
     )
 
 
@@ -412,16 +736,20 @@ async def _preview_title_ref(
     response_model=ApiResponse[PrepareView],
     summary="预览订阅目标的季集、库存和现有订阅状态",
     operation_id="ui.subscriptions.preview-title",
-    dependencies=[Depends(require_subscribe_capability)],
     openapi_extra={"x-cli-hidden": True},
 )
 async def preview_subscription_title(
     payload: SubscriptionTargetPreviewPayload,
+    principal: Principal = Depends(require_subscribe_capability),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[PrepareView]:
     """Web 表单内部能力；公开 CLI 直接使用一体化的 ``subscriptions create``。"""
     service = _service(session)
-    return ok(await _preview_title_ref(payload.title_ref, service=service, session=session))
+    return ok(
+        await _preview_title_ref(
+            payload.title_ref, service=service, session=session, is_admin=principal.is_admin
+        )
+    )
 
 
 @router.post(
@@ -446,13 +774,13 @@ async def create_subscription(
     service = _service(session)
     prepared = await _preview_title_ref(payload.title_ref, service=service, session=session)
     if prepared.status == "not_found":
-        raise NotFoundException("TMDB 未收录该条目，暂时无法订阅")
+        raise NotFoundException(message_key="errors.subscription.tmdbMissing")
     if prepared.status == "ambiguous":
         raise AppException(
             status_code=409,
             code="SUBSCRIPTION_TARGET_AMBIGUOUS",
-            message="该豆瓣条目对应多个可能的 TMDB 条目，请选择候选 title_ref 后重试",
             details=[candidate.model_dump(mode="json") for candidate in prepared.candidates],
+            message_key="errors.subscription.tmdbAmbiguous",
         )
     assert prepared.media is not None
     kind = prepared.media.kind
@@ -463,7 +791,7 @@ async def create_subscription(
         except ValueError as exc:
             raise BadRequestException(str(exc)) from exc
         if source_provider is not MediaSource.DOUBAN:
-            raise BadRequestException("source_title_ref 仅接受原始豆瓣 title_ref")
+            raise BadRequestException(message_key="errors.subscription.sourceRefRequired")
         douban_id = source_id
 
     is_member = not principal.is_admin
@@ -491,6 +819,16 @@ async def create_subscription(
         selection_mode=payload.selection_mode,
         smart_profile_revision=payload.smart_profile_revision,
         episode_floors=payload.episode_floors,
+        episode_caps=_cap_windows(payload.episode_caps),
+        smart_choice=SmartChoice(
+            language_answer=payload.smart_language_answer,
+            resolution=payload.smart_resolution,
+            source=payload.smart_source,
+            scope=payload.smart_scope,
+            memory_revision=payload.smart_memory_revision,
+        )
+        if payload.selection_mode == "smart"
+        else None,
     )
     assert subscription.id is not None
     if kind is MediaKind.TV:
@@ -520,7 +858,7 @@ async def create_subscription(
             ),
             download_routing=download_routing,
         ),
-        message="已加入订阅，正在搜索缺失资源",
+        message=t("subscription.operations.created"),
     )
 
 
@@ -599,9 +937,7 @@ async def list_subscriptions(
     media_repo = MediaItemRepository(session)
     # 只要每季的集数：数据库里分组计数，不把每一集读成元组再逐季数一遍
     seasons_by_item = await media_repo.list_seasons_many(tv_item_ids)
-    aired_by_item = await media_repo.aired_counts_by_season_many(
-        tv_item_ids, include_specials=True
-    )
+    aired_by_item = await media_repo.aired_counts_by_season_many(tv_item_ids, include_specials=True)
     owned_by_item = await LibraryFileRepository(session).owned_counts_by_season_many(tv_item_ids)
 
     files_by_item = await local_media_files(session, [item.id for _sub, item, _counts in rows])
@@ -631,6 +967,18 @@ async def list_subscriptions(
     )
     for view in views:
         view.progress.upgrading = upgrading.get(view.id, 0)
+    # 订阅上限截断的季：只有设了上限的订阅才查，没设的（绝大多数）零开销
+    capped = [(sub, item) for sub, item, _counts in rows if sub.episode_caps]
+    if capped:
+        known_max_by_item = await season_episode_max_many(
+            session, [item.id for _sub, item in capped if item.id is not None]
+        )
+        windows_by_sub = {
+            sub.id: _window_views(sub, known_max_by_item.get(item.id or -1, {}))
+            for sub, item in capped
+        }
+        for view in views:
+            view.episode_windows = windows_by_sub.get(view.id)
     # 稳定排序：缺口优先于纯洗版；同组保留仓储的最近活动时间 / id 顺序。
     views.sort(key=lambda view: view.list_priority)
     return ok(views)
@@ -762,6 +1110,7 @@ async def get_subscription(
             rule_spec = None
     if sub.selection_mode == "smart":
         from movieclaw_api.services.subscription.smart_profiles import read_policy
+
         rule_spec = read_policy(sub)
     return ok(
         await _detail_view(
@@ -861,12 +1210,13 @@ async def update_subscription(
             payload.library_id if admin and "library_id" in payload.model_fields_set else ...
         ),
         episode_floors=payload.episode_floors,
+        episode_caps=_cap_windows(payload.episode_caps),
     )
     sub, item, wanted = await service.detail(subscription_id)
     resource_timings = await service.resource_timings(subscription_id)
     return ok(
         await _detail_view(session, sub, item, wanted, resource_timings),
-        message="订阅已调整",
+        message=t("subscription.operations.updated"),
     )
 
 
@@ -918,7 +1268,10 @@ async def search_subscription_now(
         subscription_id, None if principal.is_admin else principal.member_id
     )
     reset = await service.search_now(subscription_id)
-    return ok(SearchNowView(reset_count=reset), message=f"{reset} 个缺口已重新排队，正在搜索")
+    return ok(
+        SearchNowView(reset_count=reset),
+        message=t("subscription.operations.gapsRequeued", count=reset),
+    )
 
 
 @router.post(
@@ -975,7 +1328,10 @@ async def grab_subscription_torrent(
         DownloadUnitView(season_number=w.season_number, episode_number=w.episode_number)
         for w in covered
     ]
-    return ok(GrabResultView(units=units), message=f"已投递，覆盖 {len(units)} 个追踪单元")
+    return ok(
+        GrabResultView(units=units),
+        message=t("subscription.operations.dispatched", count=len(units)),
+    )
 
 
 async def _set_tracking_state(
@@ -994,7 +1350,9 @@ async def _set_tracking_state(
     await service.set_paused(subscription_id, paused)
     sub, item, wanted = await service.detail(subscription_id)
     resource_timings = await service.resource_timings(subscription_id)
-    message = "已暂停，资源匹配与搜索将跳过该订阅" if paused else "已恢复追踪"
+    message = (
+        t("subscription.operations.paused") if paused else t("subscription.operations.resumed")
+    )
     return ok(
         await _detail_view(session, sub, item, wanted, resource_timings),
         message=message,
@@ -1043,7 +1401,7 @@ async def dismiss_subscription_episode_hint(
     resource_timings = await service.resource_timings(subscription_id)
     return ok(
         await _detail_view(session, sub, item, wanted, resource_timings),
-        message="已忽略集数提示",
+        message=t("subscription.operations.episodeHintDismissed"),
     )
 
 
@@ -1067,7 +1425,11 @@ async def set_subscription_follow_future(
     await service.set_follow_future(subscription_id, payload.enabled)
     sub, item, wanted = await service.detail(subscription_id)
     resource_timings = await service.resource_timings(subscription_id)
-    message = "已开启自动续订" if payload.enabled else "已关闭自动续订"
+    message = (
+        t("subscription.operations.autoRenewEnabled")
+        if payload.enabled
+        else t("subscription.operations.autoRenewDisabled")
+    )
     return ok(
         await _detail_view(session, sub, item, wanted, resource_timings),
         message=message,
@@ -1087,7 +1449,7 @@ async def unsubscribe_from_subscription(
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[dict]:
     if principal.is_admin or principal.member_id is None:
-        raise ForbiddenException("管理员没有成员关注关系；永久删除请使用 subscriptions delete")
+        raise ForbiddenException(message_key="errors.subscription.adminNoFollow")
     message = await _service(session).unsubscribe(
         subscription_id,
         member_id=principal.member_id,
@@ -1121,8 +1483,7 @@ async def preview_subscription_removal(
             library_bytes=plan.library_bytes,
             recycle_retention_days=RECYCLE_RETENTION_DAYS,
             retained_cross_season=[
-                RetainedTorrentView(title=t.title, seasons=list(t.seasons))
-                for t in plan.retained
+                RetainedTorrentView(title=t.title, seasons=list(t.seasons)) for t in plan.retained
             ],
         )
     )

@@ -1005,8 +1005,10 @@ nonisolated extension APIClient {
 
     /// Health check
     /// `GET /health`
-    func healthCheck() async throws -> API.HealthResponse {
-        return try await raw("GET", "/health")
+    func healthCheck(nonce: String? = nil) async throws -> API.HealthResponse {
+        var query: [URLQueryItem] = []
+        if let nonce { query.append(URLQueryItem(name: "nonce", value: "\(nonce)")) }
+        return try await raw("GET", "/health", query: query)
     }
 
     /// 列出全部监听导入规则
@@ -1499,10 +1501,11 @@ nonisolated extension APIClient {
 
     /// 海报墙的跳转索引（按标题：A-Z 首字母档；按内容时间：月份档）
     /// `GET /libraries/{library_id}/item-index`
-    func uiLibraryItemsIndex(libraryId: Int, sort: String? = nil, order: String? = nil, g: String? = nil, c: String? = nil, d: String? = nil, w: String? = nil, ratingGte: Double? = nil, rt: String? = nil, lang: String? = nil, res: String? = nil, hdr: Bool? = nil, stock: String? = nil, seriesKeys: String? = nil) async throws -> [API.LibraryIndexEntryView] {
+    func uiLibraryItemsIndex(libraryId: Int, sort: String? = nil, order: String? = nil, granularity: String? = nil, g: String? = nil, c: String? = nil, d: String? = nil, w: String? = nil, ratingGte: Double? = nil, rt: String? = nil, lang: String? = nil, res: String? = nil, hdr: Bool? = nil, stock: String? = nil, seriesKeys: String? = nil) async throws -> [API.LibraryIndexEntryView] {
         var query: [URLQueryItem] = []
         if let sort { query.append(URLQueryItem(name: "sort", value: "\(sort)")) }
         if let order { query.append(URLQueryItem(name: "order", value: "\(order)")) }
+        if let granularity { query.append(URLQueryItem(name: "granularity", value: "\(granularity)")) }
         if let g { query.append(URLQueryItem(name: "g", value: "\(g)")) }
         if let c { query.append(URLQueryItem(name: "c", value: "\(c)")) }
         if let d { query.append(URLQueryItem(name: "d", value: "\(d)")) }
@@ -2622,6 +2625,24 @@ nonisolated extension APIClient {
         return try await send("GET", "/search/torrents", query: query)
     }
 
+    /// 这台服务器的访问地址（内网 / 外网）
+    /// `GET /server/addresses`
+    func appAddressesList() async throws -> API.ServerAddressesView {
+        return try await send("GET", "/server/addresses")
+    }
+
+    /// 手动添加一个访问地址
+    /// `POST /server/addresses`
+    func appAddressesAdd(body: API.ServerAddressPayload) async throws -> API.ServerAddressesView {
+        return try await send("POST", "/server/addresses", body: body)
+    }
+
+    /// 删掉一个访问地址（学到的之后再有人用会重新出现）
+    /// `POST /server/addresses/remove`
+    func appAddressesRemove(body: API.ServerAddressRemovePayload) async throws -> API.ServerAddressesView {
+        return try await send("POST", "/server/addresses/remove", body: body)
+    }
+
     /// 最近会话列表（按最后活跃时间倒序）
     /// `GET /sessions`
     func sessionList(limit: Int? = nil, offset: Int? = nil) async throws -> [API.SessionSummary] {
@@ -2916,6 +2937,30 @@ nonisolated extension APIClient {
         if let days { query.append(URLQueryItem(name: "days", value: "\(days)")) }
         if let limit { query.append(URLQueryItem(name: "limit", value: "\(limit)")) }
         return try await send("GET", "/subscriptions/recent-arrivals", query: query)
+    }
+
+    /// get_smart_defaults
+    /// `GET /subscriptions/smart-defaults`
+    func subscriptionsGetSmartDefaults() async throws -> API.SmartDefaultsView {
+        return try await send("GET", "/subscriptions/smart-defaults")
+    }
+
+    /// put_smart_defaults
+    /// `PUT /subscriptions/smart-defaults`
+    func subscriptionsSaveSmartDefaults(body: API.SmartDefaultsPayload) async throws -> API.SmartDefaultsView {
+        return try await send("PUT", "/subscriptions/smart-defaults", body: body)
+    }
+
+    /// get_smart_memory
+    /// `GET /subscriptions/smart-memory`
+    func subscriptionsGetSmartMemory() async throws -> API.SmartMemoryView {
+        return try await send("GET", "/subscriptions/smart-memory")
+    }
+
+    /// patch_smart_memory
+    /// `PATCH /subscriptions/smart-memory`
+    func subscriptionsUpdateSmartMemory(body: API.SmartMemoryPatch) async throws -> API.SmartMemoryView {
+        return try await send("PATCH", "/subscriptions/smart-memory", body: body)
     }
 
     /// 预览订阅目标的季集、库存和现有订阅状态

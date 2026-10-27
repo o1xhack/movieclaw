@@ -21,6 +21,7 @@
 # 其他可选环境变量：
 #   MC_BUILD_NUMBER  构建号（默认 UTC 时间 yyyyMMddHHmm：同一营销版本下每次上传必须递增）
 #   MC_DERIVED       DerivedData 目录（默认 build-release/DerivedData）
+#   MC_BUILD_OUT     归档、导出与日志目录（默认 build-release）
 #   MC_SPM           共享的 Swift 包缓存目录（默认 ~/workspace/.mc-ios-spm，同 build.sh）
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,7 +55,7 @@ command -v xcodegen >/dev/null || { echo "错误：需要 XcodeGen（brew instal
 scripts/prepare-project.py
 
 settings="$(xcodebuild -project MovieClaw.xcodeproj -scheme "$scheme" -configuration Release \
-  -clonedSourcePackagesDirPath "${MC_SPM:-$HOME/workspace/.mc-ios-spm}" -onlyUsePackageVersionsFromResolvedFile -showBuildSettings 2>/dev/null)"
+  -clonedSourcePackagesDirPath "${MC_SPM:-$HOME/workspace/.mc-ios-spm}" -packageAuthorizationProvider netrc -onlyUsePackageVersionsFromResolvedFile -showBuildSettings 2>/dev/null)"
 setting() { awk -v k="$1" '$1 == k && $2 == "=" { $1 = ""; $2 = ""; sub(/^ +/, ""); print; exit }' <<<"$settings"; }
 team="$(setting DEVELOPMENT_TEAM)"
 bundle_id="$(setting PRODUCT_BUNDLE_IDENTIFIER)"
@@ -71,7 +72,7 @@ if [[ -n "$(git status --porcelain -- .)" ]]; then
   echo "⚠️  apps/apple 下有未提交的改动，打进包里的代码与提交 $commit 不完全一致" >&2
 fi
 
-out="build-release"
+out="${MC_BUILD_OUT:-build-release}"
 name="${scheme}-${version}-${build}"
 archive="$out/$name.xcarchive"
 mkdir -p "$out"

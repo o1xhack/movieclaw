@@ -20,7 +20,7 @@ import {
   ShareView
 } from '../api/Models';
 import { SharePanel, shareMessage } from '../library/ShareSheet';
-import { PlayerParams } from '../player/PlayerPage';
+import { PlayerParams } from '../player/PlayerParams';
 import { ItemRouteParams } from '../library/LibraryItemDetailPage';
 import { PersonParams } from '../discover/PersonDetailPage';
 
@@ -138,6 +138,9 @@ export struct ReelsPage {
   private started: boolean = false;
   private player: media.AVPlayer | null = null;
   private surfaceController: XComponentController = new XComponentController();
+  private surfaceId: string = '';
+  /** 播放器已到 initialized、XComponent surface 还没就绪：等 onLoad 回调补挂 */
+  private waitSurface: boolean = false;
   private tick: number = -1;
 
   // —— 手势层（与播放器页 onGesture 同一状态机，阈值照搬 iOS PlayerGestureLayer）——
@@ -172,6 +175,9 @@ export struct ReelsPage {
   private itemsSource: ReelItemsSource = new ReelItemsSource();
   @Local private index: number = 0;
   @Local private playing: boolean = false;
+  /** 视频真实宽高比：surface 是画布、播放器会把画面铺满它，
+   * 横带固定 16:9 时非 16:9 的片源会被拉变形——按真实比例在带内 letterbox/pillarbox */
+  @Local private videoAspect: number = 16 / 9;
   /** 当前这一条收藏 / 已看（点了就把状态推到服务端） */
   @Local private favorite: boolean = false;
   @Local private played: boolean = false;
@@ -186,6 +192,10 @@ export struct ReelsPage {
   /** 因路由压栈被自动暂停的（回来要接着放）；用户自己按停的不算 */
   private routePaused: boolean = false;
   @Local private positionMs: number = 0;
+  /** timeUpdate 的 500ms 节流桶：直写 @Local 会拖整页进度线高频重渲染 */
+  private timeBucket: number = -1;
+  /** 播放代数：快速连滑时旧代 await 之后的结果全部作废，防止两个 AVPlayer 并发出声、解码器泄漏 */
+  private playGen: number = 0;
   /** 服务端开了「片段预切」时的进度（nil = 没开预切，刷的是原片）：空态与刷到底的提示读它 */
   @Local private clips: ReelClipProgressView | null = null;
   /** 刷到底了（这一页 has_more=false）：末尾追加「没有更多了」页 */
@@ -458,13 +468,24 @@ export struct ReelsPage {
     if (item === null) {
       return;
     }
+    // 代数守卫：翻页期间本函数有 3 个 await，快滑时两次调用会重叠——
+    // 旧代落定后要么放弃手里的新播放器（孤儿，立刻释放），要么整体让位
+    const gen: number = ++this.playGen;
+    // 新一代起播：上一页的 surface 一律作废，等 XComponent onLoad 给新的；
+    // 否则可能把播放器绑到已销毁的旧 surface 上（401 SurfaceUtils）
+    this.surfaceId = '';
+    this.waitSurface = false;
     // 翻页就换播放器：**一个时刻只留一个**，否则滑十几页会开十几个解码器
     this.disarmHoldTimer();
     this.endHoldSpeed();
     await this.releasePlayer();
+    if (gen !== this.playGen) {
+      return;
+    }
     this.stopTick();
     this.paused = false;
     this.positionMs = 0;
+    this.timeBucket = -1;
 
     // 预切片段（play.mode == "clip"）：服务端切好的 1080p 小文件，第 0 秒就是原片的片段起点
     const isClip: boolean = item.play.mode === 'clip';
@@ -479,14 +500,21 @@ export struct ReelsPage {
     this.failed = false;
     try {
       const player: media.AVPlayer = await media.createAVPlayer();
+      if (gen !== this.playGen) {
+        // 创建期间又翻了页：这就是孤儿播放器，别接上，直接收掉
+        this.discardPlayer(player);
+        return;
+      }
       this.player = player;
-      this.bind(player, item.segment.start_ms, item.segment.end_ms, isClip);
+      this.bind(player, gen, item.segment.start_ms, item.segment.end_ms, isClip);
+      // 设 url 后要等 stateChange 到 initialized 才能挂 surface、调 prepare：
+      // 抢跑调 prepare 会报 5400102——正是线上「放不了这一段（5400102）」的根因
       player.url = AppModel.origin() + url;
-      await player.prepare();
-      this.playing = true;
-      player.play();
-      this.startTick();
     } catch (error) {
+      if (gen !== this.playGen) {
+        // 已被更新的翻页接管：错误面板由新页负责
+        return;
+      }
       const e = error as BusinessError;
       this.playing = false;
       this.failed = true;
@@ -494,24 +522,62 @@ export struct ReelsPage {
     }
   }
 
+  /** 放弃一个没接上班的播放器：异步释放，已释放过的失败忽略 */
+  private discardPlayer(player: media.AVPlayer): void {
+    player.release().catch((): void => {
+    });
+  }
+
   /**
-   * 服务端给的流地址是相对路径，要拼上当前服务地址。
+   * 事件绑定。prepare 必须等 stateChange 到 initialized 才能调（设 url 后不会立刻进该状态，
+   * 抢跑报 5400102）；视频还要先挂上 XComponent 的 surface 才有渲染面。
    * clip 模式：clip 文件的时间原点就是片段起点（第 0 秒 = 原片 start_ms），
    * 直接从 0 播、到片段时长就停；seek 模式照旧按原片时间轴。
    */
-  private bind(player: media.AVPlayer, startMs: number, endMs: number, isClip: boolean): void {
+  private bind(player: media.AVPlayer, gen: number, startMs: number, endMs: number, isClip: boolean): void {
     player.on('stateChange', (state: string): void => {
+      if (gen !== this.playGen) {
+        // 旧代播放器的事件一律不认
+        return;
+      }
       if (state === 'initialized') {
-        player.prepare();
+        if (this.surfaceId.length > 0) {
+          this.attachSurfaceAndPrepare(player);
+        } else {
+          // surface 还没就绪：等 XComponent onLoad 回调补挂
+          this.waitSurface = true;
+        }
+      } else if (state === 'prepared') {
+        this.playing = true;
+        player.play();
+        this.startTick();
+      }
+    });
+    // 视频尺寸：拿到真实的宽高比，surface 才不会把画面拉变形（同 PlayerPage）
+    player.on('videoSizeChange', (width: number, height: number): void => {
+      if (gen !== this.playGen) {
+        return;
+      }
+      if (width > 0 && height > 0) {
+        this.videoAspect = width / height;
       }
     });
     player.on('error', (error: BusinessError): void => {
+      if (gen !== this.playGen) {
+        // 旧代播放器的错误由它自己负责，别覆盖新页面板
+        return;
+      }
       this.playing = false;
       this.failed = true;
       this.errorMessage = `放不了这一段：${error.message}`;
     });
     player.on('timeUpdate', (time: number): void => {
-      this.positionMs = isClip ? time : time - startMs;
+      // 高频回调：按 500ms 桶节流写 @Local，进度线 2Hz 足够顺（0.5s 一跳肉眼无感）
+      const bucket: number = Math.floor(time / 500);
+      if (bucket !== this.timeBucket) {
+        this.timeBucket = bucket;
+        this.positionMs = isClip ? time : time - startMs;
+      }
       // **到片段终点就停**——片段是「从整片里切出来的一段」，不是整片
       // （clip 的 time 本身就是片段内位置，与「片段时长」同轴；seek 的 time 是原片位置，与 endMs 同轴）
       const endAt: number = isClip ? endMs - startMs : endMs;
@@ -520,6 +586,30 @@ export struct ReelsPage {
         this.paused = true;
       }
     });
+  }
+
+  /** 挂渲染面并 prepare（surfaceId 就绪后调）；prepare 走事件流，失败也落到失败面板 */
+  private attachSurfaceAndPrepare(player: media.AVPlayer): void {
+    player.surfaceId = this.surfaceId;
+    player.prepare().catch((error: BusinessError): void => {
+      if (this.player !== player) {
+        // 已被翻页接管：失败面板由新页负责
+        return;
+      }
+      this.playing = false;
+      this.failed = true;
+      this.errorMessage = `放不了这一段（${error.code ?? -1}）`;
+    });
+  }
+
+  /** surface 宽（横带宽的百分比）：宽于等于 16:9 铺满带宽，窄于按带高反推 */
+  private surfaceWidthPct(): string {
+    return this.videoAspect >= 16 / 9 ? '100%' : `${(this.videoAspect * 9 / 16) * 100}%`;
+  }
+
+  /** surface 高（横带高的百分比）：宽于 16:9 按带宽反推（上下留空），否则铺满带高 */
+  private surfaceHeightPct(): string {
+    return this.videoAspect >= 16 / 9 ? `${(16 / (9 * this.videoAspect)) * 100}%` : '100%';
   }
 
   /** 进度线按片段算（同 iOS：最底下那条细线不按整部片） */
@@ -904,8 +994,18 @@ export struct ReelsPage {
                   type: XComponentType.SURFACE,
                   controller: this.surfaceController
                 })
-                  .width('100%')
-                  .height('100%')
+                  // 按视频真实比例在 16:9 横带内自适应（宽于 16:9 上下留空、窄于则左右留空）
+                  .width(this.surfaceWidthPct())
+                  .height(this.surfaceHeightPct())
+                  .onLoad((): void => {
+                    this.surfaceId = this.surfaceController.getXComponentSurfaceId();
+                    // 播放器先到 initialized、surface 后就绪：补挂起播
+                    const player: media.AVPlayer | null = this.player;
+                    if (this.waitSurface && player !== null && player.state === 'initialized') {
+                      this.waitSurface = false;
+                      this.attachSurfaceAndPrepare(player);
+                    }
+                  })
                 /*
                  * **没出第一帧前用横版剧照顶着**（iOS：`没出第一帧前横带里放横版剧照`）。
                  * 不这么做的话，转码还没出片时横带就是一块纯黑——用户以为坏了。

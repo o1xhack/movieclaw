@@ -50,6 +50,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from movieclaw_api.i18n import t
+from movieclaw_api.i18n.stored import keyed_error, source_text
 from movieclaw_kernel import Entry, Plugin
 from movieclaw_kernel.contracts import Version, check_requires, satisfies
 
@@ -68,10 +70,17 @@ MAX_FILES = 5000
 _ID = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 #: 旧格式（带命名空间点）：只认已经装上的插件包——代码里写死了这个 id，宿主不能替它改名
 _LEGACY_ID = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9_-]*)+$")
-ID_RULE = "小写字母开头，只用小写字母、数字和连字符，3～40 位，不含点，如 group-blocklist"
+# 展示规则见 plugins.package.idRule（读者语言）；这里保留中文原文供旧调用方拼接
+ID_RULE = source_text("plugins.package.idRule")
 
 #: 插件网页入口（docs/design/plugin-web-pages.md）：包里有它就带网页
 WEB_INDEX = "web/index.html"
+#: 网页主题（docs/design/theme-plugins.md §3）：外观必需，外框组件可选
+THEME_CSS = "theme/theme.css"
+THEME_JS = "theme/index.js"
+#: 主题契约名（movieclaw_sdk.theme）：带外框组件的主题须在 [requires] 里声明
+THEME_CONTRACT = "ui.theme"
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 _VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 _MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -86,11 +95,23 @@ class PackageError(ValueError):
 
 
 # ---------------------------------------------------------------------- 清单
+class LocalizedText(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+    lang: str | None = None
+    dir: Literal["auto", "ltr", "rtl"] | None = None
+
+
+LocalizedMap = dict[str, str | LocalizedText]
+
+
 class _Plugin(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(max_length=64)
     title: str = Field(min_length=1, max_length=60)
+    title_localized: LocalizedMap = Field(default_factory=dict)
     version: str
     entry: str = ""
     runtime: Literal["process", "inline", "exec"] = "process"
@@ -99,27 +120,28 @@ class _Plugin(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     sdk: str = "^1.0"
     description: str = Field(default="", max_length=500)
+    description_localized: LocalizedMap = Field(default_factory=dict)
 
     @field_validator("id")
     @classmethod
     def _id(cls, value: str) -> str:
         # 旧格式在这里放行，是否允许由安装流程按「是否已经装过」决定（is_legacy_id）
         if not _ID.match(value) and not _LEGACY_ID.match(value):
-            raise ValueError(f"id 须{ID_RULE}")
+            raise ValueError(t("plugins.package.idInvalid", rule=t("plugins.package.idRule")))
         return value
 
     @field_validator("version")
     @classmethod
     def _version(cls, value: str) -> str:
         if not _VERSION.match(value):
-            raise ValueError("version 须是 主.次.修订（如 1.2.0）")
+            raise ValueError(t("plugins.package.versionInvalid"))
         return value
 
     @field_validator("entry")
     @classmethod
     def _entry(cls, value: str) -> str:
         if value and not _MODULE.match(value):
-            raise ValueError("entry 须是模块名（如 group_blocklist）")
+            raise ValueError(t("plugins.package.entryInvalid"))
         return value
 
     @model_validator(mode="after")
@@ -130,11 +152,9 @@ class _Plugin(BaseModel):
             return self
         parts = (self.command or "").split("/")
         if not self.command or any(not p or p in (".", "..") for p in parts):
-            raise ValueError(
-                "runtime = exec 须给 command（包内可执行文件的相对路径，如 bin/bridge）"
-            )
+            raise ValueError(t("plugins.package.execCommand"))
         if not self.platforms:
-            raise ValueError('runtime = exec 须给 platforms（如 ["linux/amd64", "linux/arm64"]）')
+            raise ValueError(t("plugins.package.execPlatforms"))
         return self
 
 
@@ -157,10 +177,10 @@ class _Permissions(BaseModel):
 
         bad = [name for name in value if not NAME.match(name)]
         if bad:
-            names = "、".join(bad)
-            raise ValueError(f"回调端点名 {names} 不合规：小写字母开头，字母、数字、连字符")
+            names = t("common.list.separator").join(bad)
+            raise ValueError(t("plugins.package.callbackNames", names=names))
         if len(set(value)) != len(value):
-            raise ValueError("回调端点名重复")
+            raise ValueError(t("plugins.package.callbackDuplicate"))
         return value
 
 
@@ -175,7 +195,50 @@ class _Dependencies(BaseModel):
     def _lock(cls, value: str) -> str:
         parts = value.split("/")
         if not value or value.startswith("/") or any(p in ("", ".", "..") for p in parts):
-            raise ValueError("lock 须是包内的相对路径（如 requirements.lock）")
+            raise ValueError(t("plugins.package.lockPath"))
+        return value
+
+
+class _ThemePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bg: str
+    accent: str
+
+    @field_validator("bg", "accent")
+    @classmethod
+    def _color(cls, value: str) -> str:
+        if not _HEX_COLOR.match(value):
+            raise ValueError(t("plugins.package.color"))
+        return value
+
+
+class _Theme(BaseModel):
+    """清单的 ``[theme]`` 段：主题的静态事实（docs/design/theme-plugins.md §3）。
+
+    主题 id 就是插件 id；名称、预览色、状态栏色、版式、玻璃都在这里，内核不执行主题代码就能
+    列出、校验、展示主题，首帧也只靠这些。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=20)
+    label_localized: LocalizedMap = Field(default_factory=dict)
+    description: str = Field(default="", max_length=80)
+    description_localized: LocalizedMap = Field(default_factory=dict)
+    preview: _ThemePreview
+    theme_color: str = "#000000"
+    """浏览器地址栏 / PWA 状态栏颜色"""
+    layout: Literal["panel", "cinema"] = "panel"
+    """版式：panel = 侧栏 + 居中面板；cinema = 顶栏 + 满出血（须带外框组件提供顶栏）"""
+    glass: bool = True
+    """是否用液态玻璃（WebGL 画布与玻璃材质）"""
+
+    @field_validator("theme_color")
+    @classmethod
+    def _theme_color(cls, value: str) -> str:
+        if not _HEX_COLOR.match(value):
+            raise ValueError(t("plugins.package.color"))
         return value
 
 
@@ -191,6 +254,9 @@ class Manifest(BaseModel):
     """插件自己的事件（domain-events.md §7.2）：``{name, title}``，名字以插件 id 开头。"""
     notifications: list[dict[str, Any]] = Field(default_factory=list)
     """插件事件对应的通知规则：``{event, title, body, audience, level, default, open}``。"""
+    theme: _Theme | None = None
+    """网页主题（docs/design/theme-plugins.md）：有这一段就是主题包，
+    包里须有 ``theme/theme.css``。"""
 
     def declarations(self) -> Any:
         """解析事件 / 通知 / 敏感事件声明；不合规抛 ``DeclarationError``。"""
@@ -214,58 +280,100 @@ class Manifest(BaseModel):
 def read_archive(data: bytes) -> tuple[Manifest, zipfile.ZipFile]:
     """校验压缩包本身（大小、路径、软链）并读出清单；不检查兼容性。"""
     if len(data) > MAX_ARCHIVE_BYTES:
-        raise PackageError(f"插件包超过 {MAX_ARCHIVE_BYTES // (1024 * 1024)} MB")
+        raise keyed_error(
+            PackageError, "plugins.package.tooLarge", mb=MAX_ARCHIVE_BYTES // (1024 * 1024)
+        )
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
-        raise PackageError("不是有效的插件包（须是 zip 格式的 .mcplugin）") from exc
+        raise keyed_error(PackageError, "plugins.package.notZip") from exc
     infos = archive.infolist()
     if len(infos) > MAX_FILES:
-        raise PackageError(f"插件包里的文件超过 {MAX_FILES} 个")
+        raise keyed_error(PackageError, "plugins.package.tooManyFiles", count=MAX_FILES)
     total = 0
     for info in infos:
         name = PurePosixPath(info.filename)
         if info.filename.startswith(("/", "\\")) or ".." in name.parts or ":" in info.filename:
-            raise PackageError(f"插件包里有不安全的路径：{info.filename}")
+            raise keyed_error(PackageError, "plugins.package.unsafePath", path=info.filename)
         mode = info.external_attr >> 16
         if stat.S_ISLNK(mode):
-            raise PackageError(f"插件包里不能有软链接：{info.filename}")
+            raise keyed_error(PackageError, "plugins.package.symlink", path=info.filename)
         total += info.file_size
     if total > MAX_UNPACKED_BYTES:
-        raise PackageError(f"插件包解压后超过 {MAX_UNPACKED_BYTES // (1024 * 1024)} MB")
+        raise keyed_error(
+            PackageError, "plugins.package.unpackedTooLarge", mb=MAX_UNPACKED_BYTES // (1024 * 1024)
+        )
     try:
         raw = archive.read(MANIFEST)
     except KeyError as exc:
-        raise PackageError(f"插件包根目录缺少 {MANIFEST}") from exc
+        raise keyed_error(PackageError, "plugins.package.manifestMissing", name=MANIFEST) from exc
     try:
         manifest = Manifest.model_validate(tomllib.loads(raw.decode("utf-8")))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-        raise PackageError(f"{MANIFEST} 不是合法的 TOML：{exc}") from exc
+        raise keyed_error(
+            PackageError, "plugins.package.manifestToml", name=MANIFEST, error=exc
+        ) from exc
     except ValidationError as exc:
         first = exc.errors()[0]
         where = ".".join(str(p) for p in first["loc"])
-        raise PackageError(f"{MANIFEST} 的 {where} 不合规：{first['msg']}") from exc
+        raise keyed_error(
+            PackageError,
+            "plugins.package.manifestField",
+            name=MANIFEST,
+            field=where,
+            error=first["msg"],
+        ) from exc
     entry = manifest.plugin.entry
     names = set(archive.namelist())
+    check_theme(manifest, names)
     if manifest.plugin.runtime != "exec" and not entry:
-        if WEB_INDEX not in names:
-            raise PackageError(
-                f"entry 必填（入口模块名，如 group_blocklist）；只带网页的插件须有 {WEB_INDEX}"
+        if WEB_INDEX not in names and manifest.theme is None:
+            raise keyed_error(
+                PackageError, "plugins.package.entryRequired", web=WEB_INDEX, css=THEME_CSS
             )
         if manifest.dependencies is not None:
-            raise PackageError("只带网页的插件（entry 留空）不能声明第三方依赖")
+            raise keyed_error(PackageError, "plugins.package.webNoDependencies")
     elif manifest.plugin.runtime == "exec":
         if manifest.plugin.command not in names:
-            raise PackageError(f"插件包里找不到可执行文件 {manifest.plugin.command}")
+            raise keyed_error(
+                PackageError, "plugins.package.commandMissing", command=manifest.plugin.command
+            )
         here = current_platform()
         if here not in manifest.plugin.platforms:
-            supported = "、".join(manifest.plugin.platforms)
-            raise PackageError(f"插件包只支持 {supported}，这台服务器是 {here}")
+            raise keyed_error(
+                PackageError,
+                "plugins.package.platformUnsupported",
+                supported=", ".join(manifest.plugin.platforms),
+                here=here,
+            )
     elif f"{entry}.py" not in names and f"{entry}/__init__.py" not in names:
-        raise PackageError(f"插件包里找不到入口模块 {entry}.py 或 {entry}/__init__.py")
+        raise keyed_error(PackageError, "plugins.package.entryMissing", entry=entry)
     if manifest.dependencies is not None:
         read_lock(manifest, archive)
     return manifest, archive
+
+
+#: 已安装包的清单缓存：按文件修改戳，每个静态文件请求都要查一次目录
+_manifest_cache: dict[Path, tuple[tuple[int, int], Manifest | None]] = {}
+
+
+def read_manifest(directory: Path) -> Manifest | None:
+    path = directory / MANIFEST
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = (stat.st_mtime_ns, stat.st_size)
+    cached = _manifest_cache.get(path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        manifest: Manifest | None = Manifest.model_validate(tomllib.loads(path.read_text("utf-8")))
+    except Exception:  # noqa: BLE001 -- 装好的包清单坏了：当它不是主题，别让整个目录挂掉
+        logger.exception("插件包清单读不出来：%s", path)
+        manifest = None
+    _manifest_cache[path] = (key, manifest)
+    return manifest
 
 
 def read_lock(manifest: Manifest, source: zipfile.ZipFile | Path) -> Any:
@@ -275,22 +383,21 @@ def read_lock(manifest: Manifest, source: zipfile.ZipFile | Path) -> Any:
     if manifest.dependencies is None:
         return None
     if manifest.plugin.runtime != "process":
-        raise PackageError(
-            '只有独立进程运行（runtime = "process"）的插件能声明第三方依赖：'
-            "在主进程里运行会改动主程序自己的环境"
-        )
+        raise keyed_error(PackageError, "plugins.package.dependenciesNeedProcess")
     name = manifest.dependencies.lock
     try:
         raw = (source / name).read_bytes() if isinstance(source, Path) else source.read(name)
     except (KeyError, FileNotFoundError) as exc:
-        raise PackageError(f"插件包里找不到锁文件 {name}（[dependencies] lock）") from exc
+        raise keyed_error(PackageError, "plugins.package.lockMissing", name=name) from exc
     try:
         lock = deps.parse_lock(raw.decode("utf-8"))
         deps.check_host(lock, deps.host_packages())
     except UnicodeDecodeError as exc:
-        raise PackageError(f"锁文件 {name} 不是 UTF-8 文本") from exc
+        raise keyed_error(PackageError, "plugins.package.lockNotUtf8", name=name) from exc
     except deps.LockError as exc:
-        raise PackageError(f"锁文件 {name} 不合规：{exc}") from exc
+        raise keyed_error(
+            PackageError, "plugins.package.lockInvalid", name=name, error=exc
+        ) from exc
     return lock
 
 
@@ -305,46 +412,54 @@ def current_platform() -> str:
 
 def check_compat(manifest: Manifest, *, reserved: set[str], operations: set[str]) -> None:
     """兼容性与权限声明检查：SDK、契约、条目 id 冲突、宿主操作是否存在。"""
+    import movieclaw_sdk.theme  # noqa: F401  # 登记 ui.theme 契约，主题包的 requires 按它检查
     from movieclaw_sdk import SDK_VERSION
 
     plugin = manifest.plugin
     if plugin.id in reserved:
-        raise PackageError(f"条目 id {plugin.id} 已被内置插件或本地插件占用")
+        raise keyed_error(PackageError, "plugins.package.idReserved", id=plugin.id)
     try:
         sdk_ok = satisfies(plugin.sdk, Version.parse(SDK_VERSION))
     except ValueError as exc:
-        raise PackageError(f"sdk 版本要求写法不对：{plugin.sdk}") from exc
+        raise keyed_error(PackageError, "plugins.package.sdkRequirement", sdk=plugin.sdk) from exc
     if not sdk_ok:
-        raise PackageError(f"插件要求 SDK {plugin.sdk}，当前是 {SDK_VERSION}，请换用兼容的版本")
+        raise keyed_error(
+            PackageError,
+            "plugins.package.sdkIncompatible",
+            required=plugin.sdk,
+            current=SDK_VERSION,
+        )
     reason = check_requires(manifest.requires, third_party=True)
     if reason:
-        raise PackageError(f"契约不兼容：{reason}")
+        raise keyed_error(PackageError, "plugins.package.contractIncompatible", reason=reason)
     from movieclaw_api.services.plugin_events import DeclarationError
 
     try:
         manifest.declarations()
     except DeclarationError as exc:
-        raise PackageError(f"事件与通知声明不合规：{exc}") from exc
+        raise keyed_error(PackageError, "plugins.package.declarationsInvalid", error=exc) from exc
     from movieclaw_api.services.plugin_files import parse_grants
 
     try:
         parse_grants(manifest.permissions.paths)
     except ValueError as exc:
-        raise PackageError(f"路径授权不合规：{exc}") from exc
+        raise keyed_error(PackageError, "plugins.package.grantsInvalid", error=exc) from exc
     from movieclaw_sdk.agent import PERMISSION_PREFIX
 
     for pattern in manifest.permissions.operations:
         if pattern.startswith(PERMISSION_PREFIX):
             # 调用 AI 助手（plugin-agent.md §5）：插件包最高 mclaw，能执行命令的不交给下载来的包
             if pattern not in ("agent:none", "agent:mclaw"):
-                raise PackageError(f"插件包只能申请 agent:none 或 agent:mclaw（当前 {pattern}）")
+                raise keyed_error(PackageError, "plugins.package.agentTier", pattern=pattern)
             continue
         if pattern.endswith(".*"):
             domain = pattern[:-2] + "."
             if not any(op.startswith(domain) for op in operations):
-                raise PackageError(f"宿主操作领域 {pattern} 不存在")
+                raise keyed_error(
+                    PackageError, "plugins.package.operationDomainMissing", pattern=pattern
+                )
         elif pattern not in operations:
-            raise PackageError(f"宿主操作 {pattern} 不存在")
+            raise keyed_error(PackageError, "plugins.package.operationMissing", pattern=pattern)
 
 
 def lock_record(manifest: Manifest, lock: Any) -> dict[str, Any] | None:
@@ -356,6 +471,26 @@ def lock_record(manifest: Manifest, lock: Any) -> dict[str, Any] | None:
         "digest": lock.digest,
         "packages": [{"name": p.name, "version": p.version} for p in lock.packages],
     }
+
+
+def check_theme(manifest: Manifest, names: set[str]) -> None:
+    """主题包的文件与声明要对得上（docs/design/theme-plugins.md §4.6）。
+
+    ``names`` 是包内相对路径。"""
+    has_css = THEME_CSS in names
+    if manifest.theme is None:
+        if has_css or THEME_JS in names:
+            raise keyed_error(PackageError, "plugins.package.themeSectionMissing")
+        return
+    if not has_css:
+        raise keyed_error(PackageError, "plugins.package.themeCssMissing", css=THEME_CSS)
+    has_js = THEME_JS in names
+    if has_js and THEME_CONTRACT not in manifest.requires:
+        raise keyed_error(
+            PackageError, "plugins.package.themeShellContract", js=THEME_JS, contract=THEME_CONTRACT
+        )
+    if manifest.theme.layout == "cinema" and not has_js:
+        raise keyed_error(PackageError, "plugins.package.cinemaNeedsShell", js=THEME_JS)
 
 
 # ---------------------------------------------------------------------- 状态
@@ -486,7 +621,7 @@ def extract(archive: zipfile.ZipFile, target: Path) -> None:
         for info in archive.infolist():
             dest = tmp / info.filename
             if not dest.resolve().is_relative_to(tmp.resolve()):
-                raise PackageError(f"插件包里有不安全的路径：{info.filename}")
+                raise keyed_error(PackageError, "plugins.package.unsafePath", path=info.filename)
             if info.is_dir():
                 dest.mkdir(parents=True, exist_ok=True)
                 continue
@@ -509,7 +644,12 @@ def _failing(entry_id: str, reason: str) -> Plugin:
     async def apply(ctx: Any) -> None:
         raise RuntimeError(reason)
 
-    return Plugin(name=entry_id, title=f"插件包 {entry_id}", apply=apply, disableable=True)
+    return Plugin(
+        name=entry_id,
+        title=source_text("plugins.package.packageTitle", id=entry_id),
+        apply=apply,
+        disableable=True,
+    )
 
 
 def web_only(entry_id: str, title: str) -> Plugin:
@@ -518,7 +658,7 @@ def web_only(entry_id: str, title: str) -> Plugin:
     async def apply(ctx: Any) -> None:
         return None
 
-    return Plugin(name=entry_id, title=title, apply=apply, disableable=True)
+    return Plugin(name=entry_id, title=title, apply=apply, disableable=True, reloadable=True)
 
 
 def _inline(path: Path, package: Installed) -> Plugin:
@@ -559,7 +699,9 @@ def _inline(path: Path, package: Installed) -> Plugin:
                 disableable=True,
                 apply_timeout=value.apply_timeout or 30.0,
             )
-    raise PackageError(f"模块 {package.entry} 里没有名为 {package.id} 的插件")
+    raise keyed_error(
+        PackageError, "plugins.package.moduleMissing", entry=package.entry, id=package.id
+    )
 
 
 def declare(package: Installed) -> None:
@@ -608,7 +750,7 @@ def entry_for(settings: object, package: Installed) -> Entry:
             declared = describe(path, package.entry, package.id, package.command)
             plugin = remote_plugin(
                 package.id,
-                title=f"{declared['title']}（独立进程）",
+                title=source_text("plugins.package.processSuffix", title=declared["title"]),
                 path=path,
                 module=package.entry,
                 command=package.command,
@@ -630,7 +772,7 @@ def _bind_dependencies(settings: object, package: Installed) -> None:
         return
     ready = plugin_deps.ready_dir(settings, package.dependencies["digest"])
     if ready is None:
-        raise PackageError("第三方依赖还没装好（插件页「重试安装依赖」）")
+        raise keyed_error(PackageError, "plugins.package.dependenciesPending")
     plugin_runtime.dependency_paths[package.id] = ready
 
 

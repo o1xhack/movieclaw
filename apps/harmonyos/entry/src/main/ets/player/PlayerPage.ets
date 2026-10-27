@@ -44,57 +44,12 @@ import {
   VideoSupportIn, PlaybackSegmentView, PlaybackProgressRequest,
   PlaybackDiagnosticsView, PlaybackPolicyView, PlaybackArtifactUploadView } from '../api/Models';
 import { JsonValue, jsonBoolValue } from '../api/JsonValue';
+import { PlayerParams } from './PlayerParams';
 
 /** 路由表注册用（router_map.json 的 buildMethod） */
 @Builder
 export function PlayerBuilder() {
   PlayerPage()
-}
-
-/** 播放器页的路由参数（会序列化，不要用 instanceof） */
-export class PlayerParams {
-  readonly mediaItemId: number;
-  readonly fileId: number;
-  readonly seasonNumber: number;
-  readonly episodeNumber: number;
-  readonly startMs: number;
-  /** 分享访客播放：走 /share/{slug}/playback 接口族，进度只存本机；空 = 站内播放 */
-  readonly shareSlug: string;
-  /** 片段播放（刷片页「全屏观看」，iOS `PlaybackClip`）：时间轴只算这段，不报观看进度 */
-  readonly clipStartMs: number;
-  readonly clipEndMs: number;
-
-  constructor(mediaItemId: number, fileId: number = 0, seasonNumber: number = 0,
-    episodeNumber: number = 0, startMs: number = 0, shareSlug: string = '',
-    clipStartMs: number = 0, clipEndMs: number = 0) {
-    this.mediaItemId = mediaItemId;
-    this.fileId = fileId;
-    this.seasonNumber = seasonNumber;
-    this.episodeNumber = episodeNumber;
-    this.startMs = startMs;
-    this.shareSlug = shareSlug;
-    this.clipStartMs = clipStartMs;
-    this.clipEndMs = clipEndMs;
-  }
-
-  static of(param: Object | undefined | null): PlayerParams | null {
-    if (param === undefined || param === null) {
-      return null;
-    }
-    const raw: PlayerParams = param as PlayerParams;
-    const id: number = raw.mediaItemId;
-    if (!Number.isFinite(id) || id <= 0) {
-      return null;
-    }
-    return new PlayerParams(Math.floor(id),
-      Number.isFinite(raw.fileId) ? Math.floor(raw.fileId) : 0,
-      Number.isFinite(raw.seasonNumber) ? Math.floor(raw.seasonNumber) : 0,
-      Number.isFinite(raw.episodeNumber) ? Math.floor(raw.episodeNumber) : 0,
-      Number.isFinite(raw.startMs) ? Math.floor(raw.startMs) : 0,
-      raw.shareSlug !== undefined && raw.shareSlug !== null ? raw.shareSlug : '',
-      Number.isFinite(raw.clipStartMs) ? Math.floor(raw.clipStartMs) : 0,
-      Number.isFinite(raw.clipEndMs) ? Math.floor(raw.clipEndMs) : 0);
-  }
 }
 
 /** `ClientCapabilityIn` 有必填字段但其余可选，仍用类构造以便阅读 */
@@ -250,6 +205,15 @@ class TrickplayTiles {
     this.index = index;
     this.sheets.clear();
     this.loading.clear();
+    this.releaseTiles();
+  }
+
+  /** 原生位图必须显式 release：只丢引用会等 GC 终结器，几十张格子的原生内存峰值明显 */
+  private releaseTiles(): void {
+    this.tiles.forEach((tile: image.PixelMap): void => {
+      tile.release().catch((): void => {
+      });
+    });
     this.tiles.clear();
   }
 
@@ -285,7 +249,7 @@ class TrickplayTiles {
       source.createPixelMap({ desiredRegion: region }).then((tile: image.PixelMap): void => {
         source.release();
         if (this.tiles.size >= 60) {
-          this.tiles.clear();
+          this.releaseTiles();
         }
         this.tiles.set(ordinal, tile);
         if (this.onSheetLoaded !== null) {
@@ -366,6 +330,8 @@ export struct PlayerPage {
   @Local private playing: boolean = false;
   @Local private durationMs: number = 0;
   @Local private positionMs: number = 0;
+  /** timeUpdate 的 500ms 节流桶：播放全程约 100ms 一报，直写 @Local 会拖整层控制条高频重算 */
+  private timeBucket: number = -1;
   @Local private title: string = '';
 
   private mediaItemId: number = 0;
@@ -475,14 +441,25 @@ export struct PlayerPage {
   private gestureIntent: string = 'undecided';
   private holdTimer: number = -1;
   private lastTapAt: number = 0;
+  private lastTapXRatio: number = 0.5;
   /** 双击跳转后控制层要恢复成第一下点之前的样式（iOS lastTapChromeState） */
   private lastTapChromeState: boolean = true;
+  private singleTapTimer: number = -1;
   /** 手势层尺寸（判定排除带与满量程都要用） */
   private layerWidth: number = 0;
   private layerHeight: number = 0;
   /** 手势层在窗口里的原点：把控制条测出来的全局坐标换算回手势层坐标系 */
   private layerOriginX: number = 0;
   private layerOriginY: number = 0;
+  private backBtnX: number[] = [0, 0];
+  private landscapeBtnX: number[] = [0, 0];
+  private pipBtnX: number[] = [0, 0];
+  private capsuleRowX: number[] = [0, 0];
+  private capsuleRowWidth: number = 0;
+  private skipBtnX: number[] = [0, 0];
+  private rewindBtnX: number[] = [0, 0];
+  private playBtnX: number[] = [0, 0];
+  private forwardBtnX: number[] = [0, 0];
   /*
    * 控制条可见时的三个「禁区」纵向范围（对应 iOS `gestureExclusions` 的
    * topBarFrame / bottomBarFrame + ArkUI 特有的中央三键区）：
@@ -531,6 +508,8 @@ export struct PlayerPage {
   // —— 底栏进度条可拖（iOS PlayerProgressBar；仍是「松手才跳」）——
   private barDragging: boolean = false;
   private progressBarWidth: number = 0;
+  private barLeftX: number = 0;
+  private barY: number[] = [0, 0];
 
   // —— 会话心跳（iOS startPingLoop，15 秒一次）——
   private pingTimer: number = -1;
@@ -582,6 +561,8 @@ export struct PlayerPage {
       this.reportProgressEvent('stop');
     }
     this.stopReport();
+    // 缩略图缓存里的原生 PixelMap 显式释放（顺带清掉雪碧图缓冲）
+    this.trickplay.setIndex(null);
     this.releasePlayer();
     this.stopSession();
   }
@@ -933,11 +914,6 @@ export struct PlayerPage {
     this.avPlayer = player;
     this.bindPlayerEvents(player);
     player.url = url;
-    // 起播位置由服务端算好（直出没有会话时间轴，续播位置也得前端自己 seek）
-    const resume: number = (this.session !== null ? this.session.start_ms : 0);
-    if (resume > 0) {
-      player.seek(resume, media.SeekMode.SEEK_CLOSEST);
-    }
   }
 
   /**
@@ -981,10 +957,13 @@ export struct PlayerPage {
         }
       } else if (state === 'prepared') {
         this.durationMs = player.duration;
-        // 本机重建播放器的续位点（流式的续播在 attachPlayer 里跳过了）
         if (this.pendingSeekMs > 0) {
           player.seek(this.pendingSeekMs, media.SeekMode.SEEK_CLOSEST);
           this.pendingSeekMs = -1;
+        }
+        const resume: number = (this.session !== null ? this.session.start_ms : 0);
+        if (resume > 0) {
+          player.seek(resume, media.SeekMode.SEEK_CLOSEST);
         }
         player.play();
       } else if (state === 'playing') {
@@ -1049,7 +1028,13 @@ export struct PlayerPage {
       }
     });
     player.on('timeUpdate', (time: number): void => {
-      this.positionMs = time;
+      // 高频回调（约 100ms 一次）：按 500ms 桶节流写 @Local，状态刷新从 ~10Hz 降到 2Hz，
+      // 进度 0.5s 一跳肉眼无感；seek 后的直写不受影响
+      const bucket: number = Math.floor(time / 500);
+      if (bucket !== this.timeBucket) {
+        this.timeBucket = bucket;
+        this.positionMs = time;
+      }
       // 本机播放的秒级计时（观看时长只在播放中的墙钟时间里累计）
       const recorder: OfflineViewingRecorder | null = this.viewingRecorder;
       if (recorder !== null) {
@@ -1074,6 +1059,8 @@ export struct PlayerPage {
       }
     });
     player.on('error', (error: BusinessError): void => {
+      hilog.error(0x0000, 'PlayerPage', 'AVPlayer error: code=%{public}d msg=%{public}s',
+        error.code, error.message);
       this.onPlaybackFailed(error.message);
     });
   }
@@ -1087,11 +1074,9 @@ export struct PlayerPage {
    */
   private onPlaybackFailed(reason: string): void {
     this.disarmWatchdog();
-    // 本机失败已在回退服务端的路上：后续连发的 error 一律吞掉（防并发协商）
     if (this.localFallingBack) {
       return;
     }
-    // 本机副本放不了（文件坏 / 解码不动）：这一集不再试本机，直接回服务端流式
     if (this.localUnit !== null) {
       this.localFallingBack = true;
       this.localFailedOnce = true;
@@ -1105,17 +1090,26 @@ export struct PlayerPage {
     }
     const view: PlaybackSessionView | null = this.session;
     const tier: number = view !== null ? (view.decision.tier ?? -1) : -1;
+    hilog.error(0x0000, 'PlayerPage', 'tier=%{public}d retryCount=%{public}d failedTiers=%{public}s',
+      tier, this.retryCount, this.failedTiers.toString());
+    this.failedTiers.push(tier);
+    if (reason.includes('hevc') || reason.includes('HEVC') || reason.includes('unsupport')
+      || reason.includes('404') || reason.includes('IO error') || reason.includes('IO Resource')) {
+      for (let i: number = 0; i <= 2; i++) {
+        if (!this.failedTiers.includes(i)) {
+          this.failedTiers.push(i);
+        }
+      }
+    }
     if (tier < 0 || this.retryCount >= 1) {
       this.phase = PlayerPhase.failed;
       this.errorMessage = reason;
-      // 建议行（iOS PlayerErrorView 的 suggestion）：服务端给了用它，没给用通用提示
       const suggestion: string | null = view !== null ? (view.decision.suggestion ?? null) : null;
       this.errorSuggestion = suggestion !== null && suggestion.length > 0
         ? suggestion : '可以点「重试」再试一次；反复出现请打开「详情」查看诊断';
       return;
     }
     this.retryCount++;
-    this.failedTiers.push(tier);
     this.toast(`第 ${tier} 档放不了，正在换一档…`);
     this.stopSession();
     this.releasePlayer().then((): void => {
@@ -1154,6 +1148,10 @@ export struct PlayerPage {
     if (player === null) {
       return;
     }
+    if (player.state !== 'prepared' && player.state !== 'playing'
+      && player.state !== 'paused' && player.state !== 'completed') {
+      return;
+    }
     this.noteUserActivity();
     let target: number = Math.max(0, Math.min(this.durationMs, ms));
     // 片段播放：跳转夹进片段区间（iOS PlaybackController.seek 的 clamp）
@@ -1162,6 +1160,7 @@ export struct PlayerPage {
     }
     player.seek(target, media.SeekMode.SEEK_CLOSEST);
     this.positionMs = target;
+    this.timeBucket = Math.floor(target / 500);
   }
 
   /** 片段播放（刷片页「全屏观看」）：时间轴只算这一段，不报观看进度、不给画中画与「即将播放」 */
@@ -1889,12 +1888,31 @@ export struct PlayerPage {
        * `layerHeight` 要等首次布局才有值；拿 0 当高度会让底缘守卫吞掉所有触摸。
        * 没量出来时只守上缘，量出来后照 iOS 的双侧 32vp 守卫。
        */
-      if (touch.y <= PlayerPage.edgeGuard
-        || (this.layerHeight > 0 && touch.y >= this.layerHeight - PlayerPage.edgeGuard)) {
-        return;
+      if (touch.y <= PlayerPage.edgeGuard) {
+        if (!this.chromeVisible) {
+          return;
+        }
       }
-      // 控制条可见时的禁区（iOS `point(inside:)` 的等价物）：整次触摸不归手势层
-      if (this.chromeVisible && this.inChromeExclusion(touch.x, touch.y)) {
+      if (this.layerHeight > 0 && touch.y >= this.layerHeight - PlayerPage.edgeGuard) {
+        if (!this.chromeVisible) {
+          return;
+        }
+      }
+      const chromeHit: boolean = this.inChromeExclusion(touch.x, touch.y);
+      if (this.chromeVisible && chromeHit) {
+        this.gestureTracking = true;
+        this.gestureTouchId = touch.id;
+        this.gestureStartX = touch.x;
+        this.gestureStartY = touch.y;
+        if (this.inBand(touch.y, this.barY) && this.displayDurationMs() > 0) {
+          this.gestureIntent = 'barDrag';
+          this.noteUserActivity();
+          this.barDragging = true;
+          this.scrubBaseMs = this.positionMs;
+          this.barScrubTo(touch.x);
+        } else {
+          this.gestureIntent = 'chromeTap';
+        }
         return;
       }
       this.gestureTracking = true;
@@ -1940,6 +1958,9 @@ export struct PlayerPage {
         this.scrubChanged(dx);
       } else if (this.gestureIntent === 'adjust') {
         this.adjustChanged(dy);
+      } else if (this.gestureIntent === 'barDrag') {
+        this.armChromeTimer();
+        this.barScrubTo(touch.x);
       }
       return;
     }
@@ -1950,9 +1971,59 @@ export struct PlayerPage {
       }
       this.gestureTracking = false;
       const cancelled: boolean = event.type === TouchType.Cancel;
+      if (!cancelled && (this.gestureIntent === 'undecided' || this.gestureIntent === 'chromeTap')) {
+        const now: number = Date.now();
+        const isDouble: boolean = now - this.lastTapAt <= PlayerPage.doubleTapWindow;
+        const xRatio: number = touch.x / Math.max(1, this.layerWidth);
+        if (isDouble && this.phase === PlayerPhase.ready) {
+          if (this.singleTapTimer >= 0) {
+            clearTimeout(this.singleTapTimer);
+            this.singleTapTimer = -1;
+          }
+          this.lastTapAt = 0;
+          if (xRatio < 1 / 3) {
+            this.seekTo(this.positionMs - 10000);
+          } else if (xRatio > 2 / 3) {
+            this.seekTo(this.positionMs + 10000);
+          } else {
+            this.togglePlay();
+            this.chromeVisible = true;
+            this.armChromeTimer();
+          }
+          this.gestureIntent = 'undecided';
+          return;
+        }
+        this.lastTapAt = now;
+        this.lastTapXRatio = xRatio;
+        this.lastTapChromeState = this.chromeVisible;
+        if (this.gestureIntent === 'chromeTap') {
+          this.handleChromeTap(touch.x, touch.y);
+        } else {
+          if (this.singleTapTimer >= 0) {
+            clearTimeout(this.singleTapTimer);
+          }
+          this.singleTapTimer = setTimeout((): void => {
+            this.singleTapTimer = -1;
+            this.handleTap(this.lastTapXRatio);
+          }, PlayerPage.doubleTapWindow);
+        }
+        this.gestureIntent = 'undecided';
+        return;
+      }
       if (this.gestureIntent === 'undecided') {
         if (!cancelled) {
           this.handleTap(touch.x / Math.max(1, this.layerWidth));
+        }
+      } else if (this.gestureIntent === 'chromeTap') {
+        if (!cancelled) {
+          this.handleChromeTap(touch.x, touch.y);
+        }
+      } else if (this.gestureIntent === 'barDrag') {
+        this.barDragging = false;
+        const target: number = this.scrubMs;
+        this.scrubMs = -1;
+        if (!cancelled && target >= 0) {
+          this.seekTo(target);
         }
       } else if (this.gestureIntent === 'scrub') {
         this.scrubEnded(cancelled);
@@ -1965,36 +2036,108 @@ export struct PlayerPage {
     }
   }
 
-  /** 轻点：第一下永远是控制层开关（不为等双击延迟）；双击左右三分之一 = ∓10 秒 */
-  private handleTap(xRatio: number): void {
-    const now: number = Date.now();
-    const isDouble: boolean = now - this.lastTapAt <= PlayerPage.doubleTapWindow;
-    this.lastTapAt = isDouble ? 0 : now;
-    if (isDouble && this.phase === PlayerPhase.ready) {
-      if (xRatio < 1 / 3) {
-        // 第一下切过的控制层恢复原状，净效果只剩跳转
-        this.chromeVisible = this.lastTapChromeState;
-        this.seekTo(this.positionMs - 10000);
-      } else if (xRatio > 2 / 3) {
-        this.chromeVisible = this.lastTapChromeState;
-        this.seekTo(this.positionMs + 10000);
-      } else if (!this.chromeMustStayVisible()) {
-        this.chromeVisible = !this.chromeVisible;
+  private handleChromeTap(x: number, y: number): void {
+    if (this.inBand(y, this.chromeTopY) || (!this.bandsReady() && this.inTopBarFallback(y))) {
+      this.handleTopBarTap(x, y);
+    } else if ((this.inBand(y, this.chromeCenterY) && x >= this.chromeCenterX[0] && x <= this.chromeCenterX[1])
+      || (!this.bandsReady() && this.inCenterFallback(x, y))) {
+      this.handleCenterTap(x);
+    } else if (this.inBand(y, this.chromeBottomY) || (!this.bandsReady() && this.inBottomBarFallback(y))) {
+      this.handleBottomBarTap(x, y);
+    } else if (this.chromeVisible) {
+      this.chromeVisible = false;
+      if (!this.playing && this.phase === PlayerPhase.ready) {
+        this.togglePlay();
       }
-      if (this.chromeVisible) {
-        this.armChromeTimer();
+    }
+  }
+
+  private handleTopBarTap(x: number, y: number): void {
+    const globalX: number = x + this.layerOriginX;
+    if (this.backBtnX[1] > this.backBtnX[0] && globalX >= this.backBtnX[0] && globalX <= this.backBtnX[1]) {
+      this.navStack.pop();
+      return;
+    }
+    if (this.pipBtnX[1] > this.pipBtnX[0] && globalX >= this.pipBtnX[0] && globalX <= this.pipBtnX[1]) {
+      this.armChromeTimer();
+      this.togglePip();
+      return;
+    }
+    if (this.landscapeBtnX[1] > this.landscapeBtnX[0] && globalX >= this.landscapeBtnX[0] && globalX <= this.landscapeBtnX[1]) {
+      this.armChromeTimer();
+      this.toggleLandscape();
+      return;
+    }
+    if (globalX <= 56) {
+      this.navStack.pop();
+      return;
+    }
+    this.armChromeTimer();
+  }
+
+  private handleCenterTap(x: number): void {
+    const globalX: number = x + this.layerOriginX;
+    if (this.rewindBtnX[1] > this.rewindBtnX[0] && globalX >= this.rewindBtnX[0] && globalX <= this.rewindBtnX[1]) {
+      this.armChromeTimer();
+      this.seekTo(this.positionMs - 10000);
+    } else if (this.playBtnX[1] > this.playBtnX[0] && globalX >= this.playBtnX[0] && globalX <= this.playBtnX[1]) {
+      this.armChromeTimer();
+      this.togglePlay();
+    } else if (this.forwardBtnX[1] > this.forwardBtnX[0] && globalX >= this.forwardBtnX[0] && globalX <= this.forwardBtnX[1]) {
+      this.armChromeTimer();
+      this.seekTo(this.positionMs + 10000);
+    } else {
+      this.armChromeTimer();
+    }
+  }
+
+  private handleBottomBarTap(x: number, y: number): void {
+    const globalX: number = x + this.layerOriginX;
+    if (this.currentSegment() !== null && this.skipBtnX[1] > this.skipBtnX[0]
+      && globalX >= this.skipBtnX[0] && globalX <= this.skipBtnX[1]) {
+      this.armChromeTimer();
+      const segment: PlaybackSegmentView | null = this.currentSegment();
+      if (segment !== null) {
+        this.seekTo(segment.end_ms);
       }
       return;
     }
-    this.lastTapChromeState = this.chromeVisible;
-    if (this.chromeMustStayVisible()) {
-      // 必须常显时只能唤出、收不起来
-      this.chromeVisible = true;
-    } else {
-      this.chromeVisible = !this.chromeVisible;
+    const rowLeft: number = this.capsuleRowX[0];
+    const rowRight: number = this.capsuleRowX[1];
+    if (rowRight > rowLeft && globalX >= rowLeft && globalX <= rowRight && this.capsuleRowWidth > 0) {
+      const relX: number = globalX - rowLeft;
+      const segW: number = this.capsuleRowWidth / 4;
+      const idx: number = Math.min(3, Math.floor(relX / segW));
+      if (idx === 0) {
+        this.armChromeTimer();
+        this.sheetKind = 'audio';
+        this.showSheet = true;
+      } else if (idx === 1) {
+        this.armChromeTimer();
+        this.sheetKind = 'subtitle';
+        this.showSheet = true;
+      } else if (idx === 2) {
+        this.armChromeTimer();
+        this.sheetKind = 'quality';
+        this.showSheet = true;
+      } else {
+        this.armChromeTimer();
+        this.sheetKind = 'stats';
+        this.showSheet = true;
+      }
+      return;
     }
+    this.armChromeTimer();
+    return;
+  }
+
+  /** 轻点：第一下永远是控制层开关（不为等双击延迟）；双击在 onGesture 里统一处理 */
+  private handleTap(xRatio: number): void {
+    this.chromeVisible = !this.chromeVisible;
     if (this.chromeVisible) {
       this.armChromeTimer();
+    } else if (!this.playing && this.phase === PlayerPhase.ready) {
+      this.togglePlay();
     }
   }
 
@@ -2036,20 +2179,52 @@ export struct PlayerPage {
       && x >= PlayerPage.edgeGuard && x <= this.layerWidth - PlayerPage.edgeGuard;
   }
 
-  /** 控制条的 `onAreaChange` 换算：全局坐标 → 手势层坐标的纵向范围 */
   private bandOf(area: Area): number[] {
-    const y: number = this.vpOf(area.globalPosition?.y ?? 0) - this.layerOriginY;
+    const y: number = this.vpOf(area.globalPosition?.y ?? 0);
     return [y, y + this.vpOf(area.height)];
   }
 
   private inBand(v: number, band: number[]): boolean {
-    return band[1] > band[0] && v >= band[0] && v <= band[1];
+    const gv: number = v + this.layerOriginY;
+    return band[1] > band[0] && gv >= band[0] && gv <= band[1];
   }
 
-  /** 控制条可见时的禁区：顶栏 / 底栏整条（全宽），中央三键只排按钮自己的横向范围 */
+  private bandsReady(): boolean {
+    return this.chromeTopY[1] > this.chromeTopY[0]
+      && this.chromeBottomY[1] > this.chromeBottomY[0];
+  }
+
+  private inTopBarFallback(y: number): boolean {
+    const gy: number = y + this.layerOriginY;
+    if (this.layerHeight <= 0) {
+      return gy <= 90;
+    }
+    return gy <= (this.layerOriginY + this.layerHeight) * 0.07;
+  }
+
+  private inBottomBarFallback(y: number): boolean {
+    const gy: number = y + this.layerOriginY;
+    if (this.layerHeight <= 0) {
+      return gy >= 660;
+    }
+    return gy >= (this.layerOriginY + this.layerHeight) * 0.84;
+  }
+
+  private inCenterFallback(x: number, y: number): boolean {
+    const gy: number = y + this.layerOriginY;
+    if (this.layerHeight <= 0 || this.layerWidth <= 0) {
+      return gy >= 320 && gy <= 440 && x >= 50 && x <= 320;
+    }
+    return gy >= (this.layerOriginY + this.layerHeight) * 0.38 && gy <= (this.layerOriginY + this.layerHeight) * 0.52
+      && x >= this.layerWidth * 0.14 && x <= this.layerWidth * 0.86;
+  }
+
   private inChromeExclusion(x: number, y: number): boolean {
-    return this.inBand(y, this.chromeTopY) || this.inBand(y, this.chromeBottomY)
-      || (this.inBand(y, this.chromeCenterY) && x >= this.chromeCenterX[0] && x <= this.chromeCenterX[1]);
+    if (this.bandsReady()) {
+      return this.inBand(y, this.chromeTopY) || this.inBand(y, this.chromeBottomY)
+        || (this.inBand(y, this.chromeCenterY) && x >= this.chromeCenterX[0] && x <= this.chromeCenterX[1]);
+    }
+    return this.inTopBarFallback(y) || this.inBottomBarFallback(y) || this.inCenterFallback(x, y);
   }
 
   private adjustBegan(side: string): void {
@@ -2959,52 +3134,24 @@ export struct PlayerPage {
 
   private progressPercent(): number {
     const duration: number = this.displayDurationMs();
-    return duration > 0 ? Math.round(this.displayPositionMs() * 100 / duration) : 0;
+    if (duration <= 0) {
+      return 0;
+    }
+    const ms: number = this.barDragging && this.scrubMs >= 0 ? this.displayScrubMs() : this.displayPositionMs();
+    return Math.round(ms * 100 / duration);
   }
 
-  // MARK: 底栏进度条（iOS PlayerProgressBar：可拖，松手才跳）
+  // MARK: 底栏进度条（iOS PlayerProgressBar）：可拖，松手才跳；触摸分发统一在 NavDestination 手势层
 
-  private onBarTouch(event: TouchEvent): void {
-    const touch: TouchObject | undefined = event.changedTouches[0];
-    if (touch === undefined) {
-      return;
-    }
-    if (event.type === TouchType.Down) {
-      if (this.displayDurationMs() <= 0) {
-        return;
-      }
-      this.noteUserActivity();
-      this.barDragging = true;
-      this.scrubBaseMs = this.positionMs;
-      this.barScrubTo(touch.x);
-      return;
-    }
-    if (!this.barDragging) {
-      return;
-    }
-    if (event.type === TouchType.Move) {
-      this.armChromeTimer();
-      this.barScrubTo(touch.x);
-      return;
-    }
-    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-      this.barDragging = false;
-      const target: number = this.scrubMs;
-      this.scrubMs = -1;
-      if (event.type === TouchType.Up && target >= 0) {
-        this.seekTo(target);
-      }
-    }
-  }
-
-  /** 拖动进度条：触点位置 → 时间轴时间（片段换算回原片时间轴再夹区间） */
+  /** 拖动进度条：页面坐标触点 → 时间轴时间（片段换算回原片时间轴再夹区间） */
   private barScrubTo(x: number): void {
     const duration: number = this.displayDurationMs();
     if (duration <= 0) {
       return;
     }
     const width: number = Math.max(1, this.progressBarWidth);
-    const ratio: number = Math.max(0, Math.min(1, x / width));
+    const barLocalX: number = x + this.layerOriginX - this.barLeftX;
+    const ratio: number = Math.max(0, Math.min(1, barLocalX / width));
     const timelineMs: number = Math.floor(ratio * duration);
     this.scrubMs = this.isClip() ? this.clipStartMs + timelineMs : timelineMs;
   }
@@ -3019,22 +3166,71 @@ export struct PlayerPage {
        */
       Stack({ alignContent: Alignment.Center }) {
         this.VideoSurface()
-        // 手势层（iOS PlayerGestureLayer）：控制条上的按钮自己会吃掉触摸，落不到这一层，
-        // 天然等价于 iOS 的「禁区」机制
-        Column()
-          .width('100%')
-          .height('100%')
-          .onAreaChange((_old: Area, newArea: Area) => {
-            this.layerWidth = this.vpOf(newArea.width);
-            this.layerHeight = this.vpOf(newArea.height);
-            this.layerOriginX = this.vpOf(newArea.globalPosition?.x ?? 0);
-            this.layerOriginY = this.vpOf(newArea.globalPosition?.y ?? 0);
-          })
-          .onTouch((event: TouchEvent) => {
-            this.onGesture(event);
-          })
         if (this.chromeVisible) {
           this.Controls()
+          // —— 中部传输（放在外层 Stack 才能相对全屏居中）——
+          Row({ space: 36 }) {
+            Column() {
+              SymbolGlyph($r('sys.symbol.gobackward_10'))
+                .fontSize(26)
+                .fontColor(['#ffffff'])
+            }
+            .width(56)
+            .height(56)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor('rgba(255,255,255,0.12)')
+            .borderRadius(28)
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onAreaChange((_old: Area, newArea: Area) => {
+              const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+              this.rewindBtnX = [gx, gx + this.vpOf(newArea.width)];
+            })
+            Column() {
+              SymbolGlyph(this.playing ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
+                .fontSize(34)
+                .fontColor(['#ffffff'])
+            }
+            .width(76)
+            .height(76)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor('rgba(255,255,255,0.16)')
+            .borderRadius(38)
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onAreaChange((_old: Area, newArea: Area) => {
+              const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+              this.playBtnX = [gx, gx + this.vpOf(newArea.width)];
+            })
+            Column() {
+              SymbolGlyph($r('sys.symbol.goforward_10'))
+                .fontSize(26)
+                .fontColor(['#ffffff'])
+            }
+            .width(56)
+            .height(56)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .backgroundColor('rgba(255,255,255,0.12)')
+            .borderRadius(28)
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onAreaChange((_old: Area, newArea: Area) => {
+              const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+              this.forwardBtnX = [gx, gx + this.vpOf(newArea.width)];
+            })
+          }
+          .justifyContent(FlexAlign.Center)
+          .width('100%')
+          .position({ x: 0, y: '50%' })
+          .translate({ y: -40 })
+          .hitTestBehavior(HitTestMode.Transparent)
+          .onAreaChange((_old: Area, newArea: Area) => {
+            const gy: number = this.vpOf(newArea.globalPosition?.y ?? 0) - 40;
+            const gh: number = this.vpOf(newArea.height);
+            this.chromeCenterY = [gy, gy + gh];
+            const x: number = this.vpOf(newArea.globalPosition?.x ?? 0) - this.layerOriginX;
+            this.chromeCenterX = [x, x + this.vpOf(newArea.width)];
+          })
         }
         // 本机外挂字幕：系统只回调文本不代画，自己画在底栏上方（控制条之下、常驻显示）。
         // 样式走本机偏好（iOS SubtitleStyle：字号 = 屏宽 × fontScale%、距底 bottomPercent%、背景开关）
@@ -3088,6 +3284,7 @@ export struct PlayerPage {
       .width('100%')
       .height('100%')
       .backgroundColor('#000000')
+      .expandSafeArea([SafeAreaType.SYSTEM])
       /*
        * 片尾「即将播放」卡片（iOS PlayerUpNextCard）：独立浮层，不随控制层收起；
        * 右下角、底栏上方。overlay 只包卡片本身——卡片外的触摸落不到 overlay 上，
@@ -3106,6 +3303,15 @@ export struct PlayerPage {
       })
     }
     .hideTitleBar(true)
+    .onAreaChange((_old: Area, newArea: Area) => {
+      this.layerWidth = this.vpOf(newArea.width);
+      this.layerHeight = this.vpOf(newArea.height);
+      this.layerOriginX = this.vpOf(newArea.globalPosition?.x ?? 0);
+      this.layerOriginY = this.vpOf(newArea.globalPosition?.y ?? 0);
+    })
+    .onTouch((event: TouchEvent) => {
+      this.onGesture(event);
+    })
     .onReady((ctx: NavDestinationContext) => {
       this.navStack = ctx.pathStack;
       // 整屏页：收起底部标签栏（iOS 同款行为）
@@ -3142,11 +3348,11 @@ export struct PlayerPage {
   VideoSurface() {
     Stack({ alignContent: Alignment.Center }) {
       XComponent({
-        id: 'movieclaw_player_surface',
         type: XComponentType.SURFACE,
-        libraryname: '',
         controller: this.surfaceController
       })
+        .hitTestBehavior(HitTestMode.Transparent)
+        .hdrBrightness(0.0)
         /*
          * **按视频比例摆放**：surface 是个画布，播放器会把画面铺满它——
          * 给全屏尺寸就会把 16:9 的片子拉成竖屏（实测过：测试图的圆变成了竖椭圆）。
@@ -3247,33 +3453,28 @@ export struct PlayerPage {
      * 视频是全屏的，控制条浮在上面（点了画面就收起来）。
      */
     Stack({ alignContent: Alignment.Top }) {
-      // 顶部渐变
-      Column()
-        .width('100%')
-        .height(160)
-        .linearGradient({ angle: 180, colors: [['rgba(0,0,0,0.75)', 0], ['rgba(0,0,0,0)', 1]] })
-      // 底部渐变
-      Column()
-        .width('100%')
-        .height(200)
-        .linearGradient({ angle: 0, colors: [['rgba(0,0,0,0)', 0], ['rgba(0,0,0,0.7)', 1]] })
-        .position({ x: 0, y: '100%' })
-        .translate({ y: -200 })
+      // 顶部渐变（顶栏自带背景，不再单独渐变）
 
       Column() {
         // —— 顶栏（iOS PlayerTopBar）：返回 + 片名/档位 …… 画中画 ——
         Row({ space: 12 }) {
-          SymbolGlyph($r('sys.symbol.chevron_left'))
-            .fontSize(20)
-            .fontColor(['#ffffff'])
-            .width(40)
-            .height(40)
-            .backgroundColor('rgba(255,255,255,0.12)')
-            .borderRadius(20)
-            .onClick(() => {
-              this.navStack.pop();
-            })
-          Column({ space: 2 }) {
+          Column() {
+            SymbolGlyph($r('sys.symbol.chevron_left'))
+              .fontSize(20)
+              .fontColor(['#ffffff'])
+          }
+          .width(40)
+          .height(40)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+          .backgroundColor('rgba(255,255,255,0.12)')
+          .borderRadius(20)
+          .hitTestBehavior(HitTestMode.Transparent)
+          .onAreaChange((_old: Area, newArea: Area) => {
+            const x: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+            this.backBtnX = [x, x + this.vpOf(newArea.width)];
+          })
+           Column({ space: 2 }) {
             Text(this.title.length > 0 ? this.title : '播放')
               .fontSize(16)
               .fontWeight(FontWeight.Medium)
@@ -3295,8 +3496,10 @@ export struct PlayerPage {
             .padding({ left: 14, right: 14 })
             .backgroundColor('rgba(255,255,255,0.12)')
             .borderRadius(20)
-            .onClick(() => {
-              this.toggleLandscape();
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onAreaChange((_old: Area, newArea: Area) => {
+              const x: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+              this.landscapeBtnX = [x, x + this.vpOf(newArea.width)];
             })
           // 华为符号表里没有画中画图标（`pip` 不存在），用同规格的玻璃文字钮
           Text(this.pipActive ? '退出小窗' : '画中画')
@@ -3307,66 +3510,23 @@ export struct PlayerPage {
             .padding({ left: 14, right: 14 })
             .backgroundColor('rgba(255,255,255,0.12)')
             .borderRadius(20)
-            .onClick(() => {
-              this.armChromeTimer();
-              this.togglePip();
+            .hitTestBehavior(HitTestMode.Transparent)
+            .onAreaChange((_old: Area, newArea: Area) => {
+              const x: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+              this.pipBtnX = [x, x + this.vpOf(newArea.width)];
             })
         }
         .width('100%')
+        .padding({ left: 16, right: 16, top: Theme.statusBarInset + 4, bottom: 4 })
+        .linearGradient({ angle: 180, colors: [['rgba(0,0,0,0.75)', 0], ['rgba(0,0,0,0)', 1]] })
         .onAreaChange((_old: Area, newArea: Area) => {
           this.chromeTopY = this.bandOf(newArea);
-        })
-
-
-        Blank()
-
-        // —— 中部传输（iOS PlayerCenterControls：三颗居中，播放键更大）——
-        Row({ space: 36 }) {
-          SymbolGlyph($r('sys.symbol.gobackward_10'))
-            .fontSize(26)
-            .fontColor(['#ffffff'])
-            .width(56)
-            .height(56)
-            .backgroundColor('rgba(255,255,255,0.12)')
-            .borderRadius(28)
-            .onClick(() => {
-              this.armChromeTimer();
-              this.seekTo(this.positionMs - 10000);
-            })
-          SymbolGlyph(this.playing ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
-            .fontSize(34)
-            .fontColor(['#ffffff'])
-            .width(76)
-            .height(76)
-            .backgroundColor('rgba(255,255,255,0.16)')
-            .borderRadius(38)
-            .onClick(() => {
-              this.armChromeTimer();
-              this.togglePlay();
-            })
-          SymbolGlyph($r('sys.symbol.goforward_10'))
-            .fontSize(26)
-            .fontColor(['#ffffff'])
-            .width(56)
-            .height(56)
-            .backgroundColor('rgba(255,255,255,0.12)')
-            .borderRadius(28)
-            .onClick(() => {
-              this.armChromeTimer();
-              this.seekTo(this.positionMs + 10000);
-            })
-        }
-        .justifyContent(FlexAlign.Center)
-        .onAreaChange((_old: Area, newArea: Area) => {
-          this.chromeCenterY = this.bandOf(newArea);
-          const x: number = this.vpOf(newArea.globalPosition?.x ?? 0) - this.layerOriginX;
-          this.chromeCenterX = [x, x + this.vpOf(newArea.width)];
         })
 
         Blank()
 
         // —— 底栏（iOS PlayerBottomBar）：进度 + 时间 + 音轨/字幕/详情 ——
-        Column({ space: 8 }) {
+        Column({ space: 4 }) {
           // 跳过片头 / 片尾（区间是服务端整季比对认出来的，客户端只管用）
           if (this.currentSegment() !== null) {
             Row() {
@@ -3378,12 +3538,10 @@ export struct PlayerPage {
                 .backgroundColor('rgba(255,255,255,0.18)')
                 .borderRadius(18)
                 .border({ width: 1, color: 'rgba(255,255,255,0.35)' })
-                .onClick(() => {
-                  this.armChromeTimer();
-                  const segment: PlaybackSegmentView | null = this.currentSegment();
-                  if (segment !== null) {
-                    this.seekTo(segment.end_ms);
-                  }
+                .hitTestBehavior(HitTestMode.Transparent)
+                .onAreaChange((_old: Area, newArea: Area) => {
+                  const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+                  this.skipBtnX = [gx, gx + this.vpOf(newArea.width)];
                 })
             }
             .width('100%')
@@ -3415,13 +3573,12 @@ export struct PlayerPage {
             .height(4)
           }
           .width('100%')
-          .height(28)
+          .height(20)
           .justifyContent(FlexAlign.Center)
           .onAreaChange((_old: Area, newArea: Area) => {
             this.progressBarWidth = this.vpOf(newArea.width);
-          })
-          .onTouch((event: TouchEvent) => {
-            this.onBarTouch(event);
+            this.barLeftX = this.vpOf(newArea.globalPosition?.x ?? 0);
+            this.barY = this.bandOf(newArea);
           })
           Row({ space: 8 }) {
             // iOS 把**当前章节名接在时间后面**（`12:34 · Part 01`），不是拉一条章节带
@@ -3438,40 +3595,29 @@ export struct PlayerPage {
           }
           .width('100%')
           Row({ space: 0 }) {
-            this.CapsuleAction('音轨', this.audioRef.length > 0, (): void => {
-              this.armChromeTimer();
-              this.sheetKind = 'audio';
-              this.showSheet = true;
-            })
-            this.CapsuleAction(this.subtitleIndex >= 0 ? '字幕 ✓' : '字幕', this.subtitleIndex >= 0,
-              (): void => {
-                this.armChromeTimer();
-                this.sheetKind = 'subtitle';
-                this.showSheet = true;
-              })
-            this.CapsuleAction(this.maxHeight > 0 ? `画质 ${this.maxHeight}p ✓` : '画质', this.maxHeight > 0,
-              (): void => {
-                this.armChromeTimer();
-                this.sheetKind = 'quality';
-                this.showSheet = true;
-              })
-            this.CapsuleAction('详情', false, (): void => {
-              this.armChromeTimer();
-              this.sheetKind = 'stats';
-              this.showSheet = true;
-            })
+            this.CapsuleAction('音轨', this.audioRef.length > 0)
+            this.CapsuleAction(this.subtitleIndex >= 0 ? '字幕 ✓' : '字幕', this.subtitleIndex >= 0)
+            this.CapsuleAction(this.maxHeight > 0 ? `画质 ${this.maxHeight}p ✓` : '画质', this.maxHeight > 0)
+            this.CapsuleAction('详情', false)
           }
           .backgroundColor('rgba(255,255,255,0.12)')
           .borderRadius(22)
+          .onAreaChange((_old: Area, newArea: Area) => {
+            const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
+            this.capsuleRowX = [gx, gx + this.vpOf(newArea.width)];
+            this.capsuleRowWidth = this.vpOf(newArea.width);
+          })
         }
         .width('100%')
+        .padding({ left: 16, right: 16, top: 2, bottom: 0 })
+        .linearGradient({ angle: 180, colors: [['rgba(0,0,0,0)', 0], ['rgba(0,0,0,0.7)', 0.6], ['rgba(0,0,0,0.8)', 1]] })
         .onAreaChange((_old: Area, newArea: Area) => {
           this.chromeBottomY = this.bandOf(newArea);
         })
       }
       .width('100%')
       .height('100%')
-      .padding({ left: 16, right: 16, top: Theme.statusBarInset + 8, bottom: 16 })
+      .padding({ left: 16, right: 16, top: 0, bottom: 0 })
     }
     .width('100%')
     .height('100%')
@@ -3770,16 +3916,14 @@ export struct PlayerPage {
 
   /** 底部胶囊里的一颗动作键（等分胶囊宽度，两端与胶囊端头同心） */
   @Builder
-  CapsuleAction(label: string, active: boolean, onTap: () => void) {
+  CapsuleAction(label: string, active: boolean) {
     Text(label)
       .fontSize(13)
       .fontColor(active ? Theme.accentStrong : 'rgba(255,255,255,0.85)')
       .layoutWeight(1)
       .height(40)
       .textAlign(TextAlign.Center)
-      .onClick(() => {
-        onTap();
-      })
+      .hitTestBehavior(HitTestMode.Transparent)
   }
 
   /** 音轨选择：第一行是「跟随默认」，其余按后端给的序列出；insetGrouped 卡片 */

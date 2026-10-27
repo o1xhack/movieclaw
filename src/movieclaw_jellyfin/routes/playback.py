@@ -30,13 +30,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import select
 
 from movieclaw_api.api.routes.playback import get_session_segment
 from movieclaw_api.exceptions import NotFoundException
+from movieclaw_api.i18n.stored import render_value
+from movieclaw_api.services import network_side
 from movieclaw_api.services.library import skip_segments
 from movieclaw_api.services.library.access import member_content_limit, member_visible_ids
+from movieclaw_api.services.playback import trickplay
 from movieclaw_api.services.playback import watch as playback_watch
 from movieclaw_api.services.playback.adaptive import adapt_to_downlink
 from movieclaw_api.services.playback.disc_source import disc_source_for_file
@@ -63,7 +66,7 @@ from movieclaw_api.services.playback.limits import (
 from movieclaw_api.services.playback.plan import load_policy, select_execution_backend
 from movieclaw_api.services.playback.remote_worker import (
     effective_remote_transcode_config,
-    remote_worker_available,
+    remote_backends_available,
 )
 from movieclaw_api.services.playback.session import (
     DiskQuotaError,
@@ -146,6 +149,7 @@ from movieclaw_playback.subtitles import (
     resolve_external_subtitle,
     serve_subtitle_async,
 )
+from movieclaw_playback.text import reference
 from movieclaw_playback.track_policy import (
     NO_CONTEXT,
     TrackContext,
@@ -368,8 +372,8 @@ async def playback_info(
 async def _load_policy_for(segment_container: str) -> PlaybackPolicy:
     """转码策略，按播放器要的分片容器校正「有没有硬件」。
 
-    ``load_policy`` 把在线的远程 Worker 算作 VideoToolbox 硬件，但 TS 分片只能交给
-    声明了 ``mpegts`` 的 Worker：旧版 Mac Worker 的上传代理只放行 fMP4 产物，TS
+    ``load_policy`` 把在线的远程 Worker 算作硬件，但 TS 分片只能交给声明了 ``mpegts``
+    的 Worker：旧版 Mac Worker 与 Windows Worker 的上传代理只放行 fMP4 产物，TS
     分片在它本机就被拒收，ffmpeg 却不看上传响应码、照样退出码 0 转完整部片，播放器
     等满 30 秒只拿到 404（issue #444）。硬件只剩这种 Worker 时本次按「无硬件」协商：
     软转开着就退软转，没开就按直连应答（硬边界 4），并在日志里点名要更新 Worker。
@@ -380,12 +384,13 @@ async def _load_policy_for(segment_container: str) -> PlaybackPolicy:
         return policy
     if await asyncio.to_thread(available_local_backends):
         return policy
-    if remote_worker_available("videotoolbox", segment_type="mpegts"):
+    if remote_backends_available("mpegts"):
         return policy
-    if remote_worker_available("videotoolbox"):
+    if remote_backends_available():
         logger.warning(
-            "在线的远程转码 Worker 版本过旧，传不回 Infuse 等播放器要的 TS 分片，本次按无硬件"
-            "处理。请把 Mac 上的 MovieClaw 转码器更新到与服务端相同的版本"
+            "在线的远程转码 Worker 传不回 Infuse 等播放器要的 TS 分片（Windows Worker，或版本"
+            "过旧的 Mac 转码器），本次按无硬件处理。Mac 上的 MovieClaw 转码器请更新到与服务端"
+            "相同的版本"
         )
     return replace(policy, hardware_available=False)
 
@@ -472,14 +477,14 @@ def _apply_transcode_negotiation(
                 "播放器要求转码（码率上限 %s bps）但无法转码，按直连应答：%s（%s）",
                 negotiation.max_bitrate_bps,
                 f.file_path,
-                decision.reason,
+                render_value(decision.reason),
             )
         return
     source["SupportsTranscoding"] = True
     if direct_ok:
         return
     decision = adapt_to_downlink(
-        decision, negotiation.max_bitrate_bps, label="播放器要求的码率上限"
+        decision, negotiation.max_bitrate_bps, label=reference("player.decision.declaredLimit")
     )
     bitrate_exceeded = (
         negotiation.max_bitrate_bps is not None
@@ -516,7 +521,7 @@ def _apply_transcode_negotiation(
         negotiation.max_bitrate_bps,
         f.bit_rate,
         decision.video.height,
-        decision.reason,
+        render_value(decision.reason),
     )
 
 
@@ -681,13 +686,17 @@ async def video_stream(
     # 外网取流：后台的网盘上传先让路（cloud-storage.md §5.3）
     from movieclaw_api.services.drives import uplink
 
-    uplink.note(request.client.host if request.client else None)
+    uplink.note(network_side.request_side(request))
 
     files = await _files_for_ref(ref, identity.device.member_id)
     selected = _select_source(files, request.query_params.get("mediaSourceId"), item_id)
     if not selected:
         raise not_found()
     f = selected[0]
+    if request.method == "GET":
+        # 进度条预览图：与自家播放器开会话同一套后台生成（延迟 90 秒让开起播窗口），
+        # 下次打开就有预览；HEAD 只是探测，不算开播
+        trickplay.schedule(f, delay_s=90)
 
     path = Path(f.file_path)
     file_container = f.container
@@ -788,7 +797,8 @@ async def _cloud_target(request: Request, identity: RequestIdentity, f: LibraryF
         return await sources.stream_target(
             f.file_path,
             holder=f"play:{identity.device.device_id}:{f.id}",
-            client_host=request.client.host if request.client else None,
+            side=network_side.request_side(request),
+            place=f"device:{identity.device.device_id}",
             user_agent=request.headers.get("user-agent"),
             relay_fallback=sources.declares_fallback(request.headers, request.query_params),
             force_relay=request.query_params.get("relay") == "1",
@@ -846,6 +856,36 @@ async def _member_may_download(member_id: int) -> bool:
     async with get_database().session() as session:
         member = await session.get(Member, member_id)
     return member is not None and bool(member.allow_video_download)
+
+
+@router.get("/Videos/{item_id}/Trickplay/{width}/{index}.jpg")
+async def trickplay_tile(
+    request: Request,
+    item_id: str,
+    width: int,
+    index: int,
+    identity: RequestIdentity = Depends(require_device),
+) -> Response:
+    """进度条预览图的第 ``index`` 张雪碧图（#955，形态对齐 Jellyfin 10.9+）。
+
+    条目 ``Trickplay`` 字段只列已生成的版本与宽度，这里同样只认它们：版本按
+    ``mediaSourceId`` 选（缺省第一个），宽度对不上、张数越界都是 404。
+    """
+    ref = decode_guid(item_id)
+    if ref is None or ref.kind not in (EntityKind.ITEM, EntityKind.EPISODE):
+        raise not_found()
+    files = await _files_for_ref(ref, identity.device.member_id)
+    selected = _select_source(files, request.query_params.get("mediaSourceId"), item_id)
+    if not selected or selected[0].id is None:
+        raise not_found()
+    file_id = selected[0].id
+    tiles = trickplay.load_index(file_id)
+    if tiles is None or tiles.tile_width != width or not 0 <= index < len(tiles.sheets):
+        raise not_found()
+    target = trickplay.trickplay_dir(file_id) / tiles.sheets[index]
+    if not target.is_file():
+        raise not_found()
+    return FileResponse(target, media_type="image/jpeg")
 
 
 @router.get("/Items/{item_id}/Download")
@@ -1129,6 +1169,7 @@ async def video_hls_master(
     except (SessionLimitError, DiskQuotaError, SessionStartError) as exc:
         logger.warning("Jellyfin HLS 会话启动失败：%s（%s）", f.file_path, exc)
         raise not_found() from None
+    trickplay.schedule(f, delay_s=90)
     if params.play_session_id:
         # 播放器停播/换清晰度时按 PlaySessionId 精确停这一个会话
         register_play_session(
@@ -1145,7 +1186,7 @@ async def video_hls_master(
         int(spec.plan.tier),
         spec.display_name,
         session.id,
-        spec.plan.reason,
+        render_value(spec.plan.reason),
     )
     return Response(
         content=build_master_playlist(
@@ -1271,13 +1312,19 @@ async def _capped_transcode_spec(f: LibraryFile, params: TranscodeParams) -> _Se
         max_audio_channels=params.max_audio_channels,
     )
     if isinstance(decision, PlaybackRejected):
-        logger.warning("Jellyfin 转码请求被拒绝：%s（%s）", f.file_path, decision.reason)
+        logger.warning(
+            "Jellyfin 转码请求被拒绝：%s（%s）", f.file_path, render_value(decision.reason)
+        )
         raise not_found()
     if params.video_bitrate_bps:
         decision = replace(
             decision,
             video=replace(decision.video, bitrate_cap_bps=params.video_bitrate_bps),
-            reason=f"{decision.reason}；码率限到 {params.video_bitrate_bps / 1_000_000:.2f} Mbps",
+            reason=reference(
+                "player.decision.jellyfinCap",
+                reason=decision.reason,
+                cap=f"{params.video_bitrate_bps / 1_000_000:.2f}",
+            ),
         )
     hw_backend: str | None = None
     use_remote = False
@@ -1289,9 +1336,7 @@ async def _capped_transcode_spec(f: LibraryFile, params: TranscodeParams) -> _Se
             decision,
             available=backends,
             local_backends=local_backends,
-            remote_video_available=remote_worker_available(
-                "videotoolbox", segment_type=segment_type(decision)
-            ),
+            remote_video_available=bool(remote_backends_available(segment_type(decision))),
         )
         if hw_backend is None:
             if not policy.software_transcode_enabled:
@@ -1311,7 +1356,7 @@ async def _capped_transcode_spec(f: LibraryFile, params: TranscodeParams) -> _Se
             decision = replace(
                 decision,
                 tier=PlaybackTier.SOFTWARE_TRANSCODE,
-                reason=f"{decision.reason}；硬件加速当前不可用，改为软件转码",
+                reason=reference("player.decision.hardwareFallback", reason=decision.reason),
             )
     segment_plan = (
         compute_uniform_plan(float(f.duration_seconds), target_s=SEGMENT_SECONDS)

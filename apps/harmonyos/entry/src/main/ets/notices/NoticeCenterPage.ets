@@ -5,7 +5,7 @@ import { Formatters } from '../common/Formatters';
 import { ApiError } from '../api/ApiClient';
 import { jsonStringValue, jsonIntValue } from '../api/JsonValue';
 import { HandoffCenter, runHandoff, handoffMessage } from '../settings/HandoffCenter';
-import { ChatParams } from '../agent/ChatPage';
+import { ChatParams } from '../agent/ChatParams';
 import { SubscriptionParams } from '../subscriptions/SubscriptionDetailPage';
 import { SectionParams } from '../settings/SettingsIndexPage';
 import { MovieClawApi } from '../api/Endpoints';
@@ -163,7 +163,10 @@ export struct NoticeCenterPage {
   }
 
   private toast(message: string): void {
-    this.getUIContext().getPromptAction().showToast({ message: message });
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message });
+    } catch (e) {
+    }
   }
 
   // MARK: 视图
@@ -321,7 +324,7 @@ export struct NoticeCenterPage {
         Circle()
           .width(8)
           .height(8)
-          .fill(notice.severity === 'warning' ? Theme.warning : Theme.danger)
+          .backgroundColor(notice.severity === 'warning' ? Theme.warning : Theme.danger)
           .margin({ top: 6 })
         Column({ space: 4 }) {
           Row({ space: 10 }) {

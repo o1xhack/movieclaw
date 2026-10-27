@@ -48,7 +48,7 @@ def client(tmp_path, monkeypatch):
     from movieclaw_api.app import create_app
 
     app = create_app()
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Accept-Language": "zh-Hans"}) as c:
         yield c
 
     reset_setting_store()
@@ -353,10 +353,14 @@ def test_ui_preferences_isolated_per_member(client: TestClient) -> None:
     _use(client, member_cookie)
     member_draft = dict(admin_prefs)
     member_draft["sidebar"] = {**admin_prefs.get("sidebar", {}), "transparency": 0.33}
+    member_draft["language"] = "en"
     saved = client.put("/api/v1/ui/preferences", json=member_draft)
     assert saved.status_code == 200
     member_prefs = client.get("/api/v1/ui/preferences").json()["data"]
     assert member_prefs["sidebar"]["transparency"] == 0.33
+    assert member_prefs["language"] == "en"
+    legacy = client.put("/api/v1/ui/preferences", json={"theme": "silver"})
+    assert legacy.json()["data"]["language"] == "en"
 
     # 超管的全局配置不受影响
     _use(client, admin_cookie)
@@ -488,6 +492,11 @@ _MEMBER_ALLOWLIST = {
     # 真正的闸在批准那一步：人要在网页或 App 里核对配对码；转码器只有超管批得了。
     ("POST", "/api/v1/auth/device/authorize"),
     ("POST", "/api/v1/auth/device/token"),
+    # 网页主题（docs/design/theme-plugins.md §4.6）：每个人各选各的主题，成员要能读主题目录；
+    # 样式与资源是公开区（匿名可访问，成员自然可访问）；装卸主题是插件管理，仍只有管理员
+    ("GET", "/api/v1/ui/themes"),
+    ("GET", "/api/v1/ui/themes.css"),
+    ("GET", "/api/v1/ui/themes/{theme_id}/{path}"),
     # 个人信息自助（按 Principal 分流到成员表）
     ("GET", "/api/v1/auth/me"),
     ("PUT", "/api/v1/auth/profile"),
@@ -721,6 +730,8 @@ _MEMBER_ALLOWLIST = {
     # App 推送（docs/design/cloud-push.md §7.3）：每个人只管自己的通知开关、设备状态、
     # 测试通知；App 登记只认这台设备自己的凭证（服务层判定，网页会话登记不了）
     ("GET", "/api/v1/app/features"),
+    # 访问地址簿（docs/design/server-addresses.md §3.2）：各端 App 登录后据此在内外网之间自动选
+    ("GET", "/api/v1/server/addresses"),
     ("GET", "/api/v1/push/me"),
     ("PUT", "/api/v1/push/me/preferences"),
     ("POST", "/api/v1/push/me/test"),
@@ -758,6 +769,7 @@ _MEMBER_ALLOWLIST = {
 
 # 路径参数哑值（与 test_auth.py 的匿名守护测试保持一致）
 _PATH_DUMMIES = {
+    "{theme_id}": "nope-theme",
     "{product}": "x",  # 客户端更新：不存在的客户端名（422，不联网）
     "{letter_id}": "1",  # 可靠事件死信
     "{start_ms}": "0",  # 预切片段的起点
@@ -788,6 +800,7 @@ _PATH_DUMMIES = {
     "{media_item_id}": "1",
     "{rule_id}": "1",
     "{entry_id}": "1",
+    "{plugin_id}": "1",
     "{key_id}": "1",
     "{file_id}": "1",
     "{device_id}": "no-such-device",

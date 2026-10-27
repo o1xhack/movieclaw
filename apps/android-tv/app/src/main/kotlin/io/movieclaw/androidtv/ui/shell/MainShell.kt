@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
@@ -90,6 +91,8 @@ fun MainShell(args: LaunchArgs) {
     val pageFocus = remember { FocusRequester() }
     val sidebarFocus = remember { FocusRequester() }
     val saveable = rememberSaveableStateHolder()
+    /** 各页签导航栈里现有各页的保存状态 key：页被弹出时据此清掉 */
+    val shownKeys = remember { HashMap<MainTab, List<String>>() }
     val graph = io.movieclaw.androidtv.LocalGraph.current
     val session = io.movieclaw.androidtv.LocalSession.current
     val homeStore = remember(session.key) { io.movieclaw.androidtv.ui.home.HomeStore(session.api) }
@@ -116,10 +119,27 @@ fun MainShell(args: LaunchArgs) {
         args.play?.let(router::play)
     }
 
+    // 栈顶那页的焦点记忆：收起侧边栏、关掉播放器时焦点回到离开时那颗，没有记录再交给页面自己挑
+    val topLayer = remember { TopLayer() }
+    fun focusPage() {
+        if (topLayer.memory?.restore() != true) runCatching { pageFocus.requestFocus() }
+    }
+
     // 「继续观看」/ 深链：续播直接开播放器，条目回到首页页签压上详情
     val pendingLink by graph.deepLinks.collectAsState()
     LaunchedEffect(pendingLink) {
         when (val link = pendingLink ?: return@LaunchedEffect) {
+            // 桌面壳的主页键（androidtv-home.md §7.1）：退出播放（走 closePlayer 的现有路径，进度照常上报）、
+            // 收起侧栏、清空二级页、回首页根部。焦点要显式交还页面——播放器/侧栏被移除后没人接，
+            // 而「首页根部播放中按主页键」时页签与栈都不变，现有的可见性焦点恢复不会触发（评审 #1018）
+            is io.movieclaw.androidtv.system.DeepLink.Home -> {
+                if (router.player != null) router.closePlayer()
+                sidebarOpen = false
+                router.select(MainTab.Home)
+                router.stack.clear()
+                delay(30)  // 等页面先摆出来再还焦点，同 closeSidebar 的 30ms
+                focusPage()
+            }
             is io.movieclaw.androidtv.system.DeepLink.Play -> router.play(PlayRequest(link.mediaItemId, link.season, link.episode))
             is io.movieclaw.androidtv.system.DeepLink.Item -> {
                 router.select(MainTab.Home)
@@ -132,12 +152,6 @@ fun MainShell(args: LaunchArgs) {
 
     fun openSidebar() {
         sidebarOpen = true
-    }
-
-    // 栈顶那页的焦点记忆：收起侧边栏、关掉播放器时焦点回到离开时那颗，没有记录再交给页面自己挑
-    val topLayer = remember { TopLayer() }
-    fun focusPage() {
-        if (topLayer.memory?.restore() != true) runCatching { pageFocus.requestFocus() }
     }
 
     fun closeSidebar() {
@@ -201,6 +215,13 @@ fun MainShell(args: LaunchArgs) {
                 // 导航栈里每一页都保持存活（同 tvOS 导航栈）：只摆出栈顶那页，压在下面的不摆放、不参与方向键找焦点，
                 // 退回时焦点回到原来那颗（LayerFocusMemory）
                 val layers = listOf<Route?>(null) + stack
+                // 弹出栈的页清掉它保存的状态：同一深度再压进同一页是新的实例（同 tvOS 的导航栈），
+                // 不接着用上次的窗口、筛选与焦点。切页签时别的页签的栈不算弹出，保留
+                val keys = stack.mapIndexed { index, route -> "${router.tab}:${index + 1}:$route" }
+                SideEffect {
+                    shownKeys[router.tab].orEmpty().filterNot { it in keys }.forEach(saveable::removeState)
+                    shownKeys[router.tab] = keys
+                }
                 layers.forEachIndexed { index, route ->
                     val visible = index == layers.lastIndex
                     val key = if (route == null) "root:${router.tab}" else "${router.tab}:$index:$route"

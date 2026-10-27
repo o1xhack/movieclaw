@@ -18,6 +18,7 @@ from jellyfin.helpers import AUTH_HEADER, jf_login
 from movieclaw_api.core.config import get_settings
 from movieclaw_api.services.playback import plan as playback_plan
 from movieclaw_api.services.playback import session as session_mod
+from movieclaw_api.services.playback import trickplay
 from movieclaw_api.services.playback.ffmpeg_args import TranscodeCommand
 from movieclaw_api.services.playback.session import get_session_manager, reset_session_manager
 from movieclaw_api.settings import PlaybackPolicySetting
@@ -461,11 +462,12 @@ def _only_remote_worker(monkeypatch, *, ts_capable: bool) -> None:
     monkeypatch.setattr(jf_playback, "available_local_backends", lambda: ())
     monkeypatch.setattr(
         jf_playback,
-        "remote_worker_available",
-        lambda _backend="videotoolbox", segment_type="fmp4": (
-            ts_capable or segment_type == "fmp4"
+        "remote_backends_available",
+        lambda segment_type="fmp4": (
+            ("videotoolbox",) if ts_capable or segment_type == "fmp4" else ()
         ),
     )
+    monkeypatch.setattr(playback_plan, "remote_backend_can_run", lambda _plan, _backend: True)
 
 
 def test_infuse_ts_never_goes_to_outdated_remote_worker(
@@ -544,6 +546,23 @@ def test_forced_transcode_without_bitrate_and_audio_selection(
     plan = transcode_env[-1]["plan"]
     assert plan.video.height == 1080 and plan.video.bitrate_cap_bps is None
     assert plan.audio.action == "copy" and plan.audio.track_ref == "embedded:1"
+
+
+def test_hls_session_schedules_trickplay(
+    client: TestClient, seeded: dict, media_root: Path, transcode_env: list, monkeypatch
+) -> None:
+    """转码起播与自家播放器开会话一样，后台补生成进度条预览图（#955）。"""
+    scheduled: list[int] = []
+    monkeypatch.setattr(trickplay, "schedule", lambda f, *, delay_s=0: scheduled.append(f.id))
+    _enable_software_transcode(client)
+    movie = _seed_sdr_movie(client, seeded, media_root)
+    guid = item_guid(movie["item"])
+    url = client.post(
+        f"/Items/{guid}/PlaybackInfo", params={**_auth(client), "MaxStreamingBitrate": 3_000_000}
+    ).json()["MediaSources"][0]["TranscodingUrl"]
+
+    assert client.get(url, headers={"Authorization": AUTH_HEADER}).status_code == 200
+    assert scheduled == [movie["file"]]
 
 
 def test_transcode_unavailable_falls_back_to_direct_play(

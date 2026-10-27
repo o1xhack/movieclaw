@@ -71,6 +71,10 @@ enum TVCardCaption {
     /// 不预留位置——「片名 · 年份」合成一行，浮在卡片下方的行间空隙里（同系统 Apple TV App 的紧凑行距；
     /// 预留时每排海报底下常年空着一截，2026-10-04 用户嫌行与行之间空出一块）
     case focused
+    /// 只有焦点所在的那张显示，「片名 · 年份」浮在海报底部的暗带里（同影人页的焦点暗带）：海报墙用。
+    /// 海报墙上下两排挨得近，片名浮在行间会压到下一排；收进图里不占排版，网格也不变。
+    /// 很多海报只印英文、艺术字甚至没字，大库里一张张认不出来是哪部（#942），聚焦时得把库里的片名写出来
+    case band
     /// 不显示
     case hidden
 }
@@ -235,7 +239,7 @@ struct TVLibraryCard: View {
             }
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel(collection ? "合集「\(name)」，\(count) 部" : "\(name)，\(count) 部")
+        .accessibilityLabel(collection ? String(localized: .libraryCollectionTitleCount(name, count)) : String(localized: .libraryNamedTitleCount(name, count)))
     }
 
     /// 卡片 16:9、封面 21:10：封面贴顶完整显示（服务端按 21:10 拼图，4 张海报几乎铺满左右，撑满 16:9 会把两边的海报
@@ -281,7 +285,7 @@ struct TVLibraryCard: View {
     private var collectionTag: some View {
         HStack(spacing: 6) {
             Image(systemName: "rectangle.stack")
-            Text("合集")
+            Text(String(localized: .libraryCollectionsPageTitle))
         }
         .font(.system(size: 20, weight: .semibold))
         .foregroundStyle(.white.opacity(0.88))
@@ -308,7 +312,7 @@ struct TVGenreCard: View {
             Face(label: label, count: count, mediaKind: mediaKind, coverURL: coverURL, width: width)
         }
         .buttonStyle(GenreButtonStyle())
-        .accessibilityLabel("浏览\(label)，\(count) 部\(mediaKind == "tv" ? "剧集" : "电影")")
+        .accessibilityLabel((mediaKind == "tv" ? String(localized: .libraryBrowseGenreSeries(label, count)) : String(localized: .libraryBrowseGenreMovies(label, count))))
     }
 
     // tvOS 的 plain 仍带系统焦点玻璃；只使用上面的细描边与 1.07× 放大。
@@ -358,7 +362,7 @@ struct TVSeeAllCard: View {
             SeeAllLabel(total: total, width: width)
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel(total.map { "查看全部 \($0) 部" } ?? "查看全部")
+        .accessibilityLabel(total.map { String(localized: .libraryHomeViewFavorites($0)) } ?? String(localized: .libraryHomeViewAll))
     }
 
     private struct SeeAllLabel: View {
@@ -370,10 +374,10 @@ struct TVSeeAllCard: View {
             VStack(spacing: 18) {
                 Image(systemName: "square.grid.2x2")
                     .font(.system(size: 48, weight: .regular))
-                Text("查看全部")
+                Text(String(localized: .libraryHomeViewAll))
                     .font(.system(size: 28, weight: .semibold))
                 if let total {
-                    Text("\(total) 部")
+                    Text(String(localized: .libraryStatusTitleCount(total)))
                         .font(.system(size: 22))
                         .opacity(0.7)
                 }
@@ -428,6 +432,13 @@ private struct TVCardLabel<Art: View>: View {
                             .padding(.vertical, 6)
                             .background(.black.opacity(0.6), in: .capsule)
                             .padding(12)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    if caption == .band {
+                        focusBand
+                            .opacity(isFocused ? 1 : 0)
+                            .animation(.easeOut(duration: 0.2), value: isFocused)
                     }
                 }
                 .overlay(alignment: .bottom) {
@@ -487,6 +498,35 @@ private struct TVCardLabel<Art: View>: View {
             }
         }
         .preference(key: TVRowFocusKey.self, value: isFocused)
+    }
+
+    /// `.band` 的暗带：一行放得下就写「片名 · 年份」；放不下时片名折成两行（再长才截断），年份另起一行——
+    /// 截断只落在片名上，年份永远看得见（合成一行截断时被截掉的正是末尾的年份）
+    private var focusBand: some View {
+        ViewThatFits(in: .horizontal) {
+            Text("\(Text(title))\(Text(subtitle.map { " · \($0)" } ?? "").foregroundStyle(.white.opacity(0.7)))")
+                .lineLimit(1)
+                .fixedSize()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .lineLimit(2)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+        }
+        .font(.system(size: 24, weight: .semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 18)
+        .padding(.top, 60)
+        .padding(.bottom, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            LinearGradient(colors: [.clear, .black.opacity(0.55), .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+        }
+        .allowsHitTesting(false)
     }
 
     /// `.focused` 的片名：不占排版，从图的底边再往下让出焦点放大的余量（放大约 1.1 倍，
@@ -667,7 +707,7 @@ extension Formatters {
     static func remaining(positionMs: Int, durationMs: Int?) -> String? {
         guard let durationMs, durationMs > 0 else { return nil }
         let minutes = max(1, (durationMs - positionMs) / 60_000)
-        if minutes >= 60 { return "剩 \(minutes / 60) 小时 \(minutes % 60) 分" }
-        return "剩 \(minutes) 分钟"
+        if minutes >= 60 { return String(localized: .libraryRemainingHoursMinutes(minutes / 60, minutes % 60)) }
+        return String(localized: .libraryRemainingMinutes(minutes))
     }
 }

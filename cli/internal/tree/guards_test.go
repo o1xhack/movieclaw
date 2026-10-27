@@ -30,10 +30,17 @@ var knownNonGenerated = []string{
 	"skills.list",
 	// 插件网页（docs/design/plugin-web-pages.md）：侧边栏数据源与 iframe 加载的静态文件，
 	// 都是 Web 基础设施；命令行看插件网页走 app plugins pages list
+	// 网页主题（docs/design/theme-plugins.md）：前端加载器与设置页的数据源，CLI 场景无消费方
+	"ui.themes.list",
+	"ui.themes.stylesheet",
+	"ui.themes.file",
 	"ui.apps.list",
 	"ui.apps.root",
 	"ui.apps.file",
 	"ui.apps.errors.report",
+	// 插件市场的图标和截图：网页 <img> 用的二进制，命令行看市场走 app plugins market list / show
+	"app.plugins.market.icon",
+	"app.plugins.market.screenshot",
 	"auth.device.authorize",
 	"auth.device.token",
 	// 原生 App 的账号密码登录：客户端之间的协议端点，mclaw 走配对码
@@ -323,6 +330,8 @@ func TestDomainCommandSets(t *testing.T) {
 			"subscriptions.dismiss-episode-hint",
 			"subscriptions.download-selected-torrent",
 			"subscriptions.get",
+			"subscriptions.get-smart-defaults",
+			"subscriptions.get-smart-memory",
 			"subscriptions.get-smart-profile",
 			"subscriptions.list",
 			"subscriptions.list-active-downloads",
@@ -331,12 +340,14 @@ func TestDomainCommandSets(t *testing.T) {
 			"subscriptions.preview-download-routing",
 			"subscriptions.preview-removal",
 			"subscriptions.search-missing-resources",
+			"subscriptions.save-smart-defaults",
 			"subscriptions.save-smart-profile",
 			"subscriptions.set-follow-future",
 			"subscriptions.set-tracking-state",
 			"subscriptions.upgrade-run",
 			"subscriptions.unsubscribe",
 			"subscriptions.update",
+			"subscriptions.update-smart-memory",
 			"subscriptions.update-smart-wait",
 		},
 		"library": {
@@ -497,7 +508,10 @@ func TestDangerousAndLongTaskAnnotations(t *testing.T) {
 	}
 	for id, want := range map[string]string{
 		"library.items.delete":                     "destructive",
+		"playback.sync.import":                     "confirm",
+		"playback.sync.state":                      "confirm",
 		"site.boost-pool.cleanup":                  "destructive",
+		"site.proxy.request":                       "confirm",
 		"subscriptions.cleanup-seasons":            "confirm",
 		"subscriptions.delete":                     "confirm",
 		"subscriptions.unsubscribe":                "confirm",

@@ -414,6 +414,41 @@ async def test_idle_session_is_reaped(manager, monkeypatch):
     assert await wait_until(lambda: not pid_alive(pid))
 
 
+async def test_stream_disconnect_without_ping_reaps_early(manager, monkeypatch):
+    """页签直接关闭：DELETE 发不出，在途的分片响应被掐断，之后心跳与请求都没再来。
+
+    断开后超过 STREAM_DISCONNECT_REAP_S 仍没有动静 → 提前回收，
+    不让 ffmpeg 对着没人看的片转满整个空闲超时（GPU 空转数分钟）。"""
+    install_fake(monkeypatch, WRITES_PLAYLIST_THEN_SLEEPS)
+    monkeypatch.setattr(session_mod, "SESSION_IDLE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(session_mod, "STREAM_DISCONNECT_REAP_S", 0.1)
+    monkeypatch.setattr(
+        type(manager), "_signal_group", lambda self, session, signal: None
+    )
+    session = await manager.start(make_plan(), source_path="/m/a.mkv", member_id=0)
+    manager.note_stream_disconnect(session.id)
+    await asyncio.sleep(0.15)
+    assert await manager.reap() == 1
+    assert manager.get(session.id) is None
+
+
+async def test_activity_after_a_stream_disconnect_cancels_the_early_reap(manager, monkeypatch):
+    """分片响应被掐断后播放器又有动静：不提前回收。
+
+    seek 就会掐掉在途的分片请求，随后播放器照常发心跳、来取新分片。"""
+    install_fake(monkeypatch, WRITES_PLAYLIST_THEN_SLEEPS)
+    monkeypatch.setattr(session_mod, "STREAM_DISCONNECT_REAP_S", 0.1)
+    session = await manager.start(make_plan(), source_path="/m/a.mkv", member_id=0)
+    try:
+        manager.note_stream_disconnect(session.id)
+        assert manager.ping(session.id) is True
+        await asyncio.sleep(0.15)
+        assert await manager.reap() == 0
+        assert manager.get(session.id) is not None
+    finally:
+        await manager.shutdown()
+
+
 async def test_ping_keeps_session_alive(manager, monkeypatch):
     install_fake(monkeypatch, WRITES_PLAYLIST_THEN_SLEEPS)
     monkeypatch.setattr(session_mod, "SESSION_IDLE_TIMEOUT_S", 0.3)
@@ -1818,7 +1853,9 @@ def test_behind_request_ready_only_holds_probe_like_requests(manager, tmp_path):
     """宽限只留给「像探测」的落后请求：起播窗口内的列表头、以及挂号之后客户端又去
     要了别处的过时请求；紧跟着它的顺序预取不算「别处」。"""
     session = _vod_session(tmp_path, head=317, completed=set())
-    now = time.monotonic()
+    # 只测传入时间的逻辑；固定到可精确表示的值，避免真实 monotonic 的
+    # 小数在「恰好 3 秒」处相减后变成 2.999999999999986。
+    now = 100.0
     session.created_at = now - 1.0  # 会话刚开 1 秒，还在探测窗口里
 
     session.pending_since[0] = now

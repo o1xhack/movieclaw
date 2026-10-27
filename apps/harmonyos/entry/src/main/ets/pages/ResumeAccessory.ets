@@ -6,7 +6,7 @@ import { RemoteImage } from '../common/RemoteImage';
 import { ImageUrls, ImageVariant } from '../common/ImageUrls';
 import { MovieClawApi } from '../api/Endpoints';
 import { UpNextItemView } from '../api/Models';
-import { PlayerParams } from '../player/PlayerPage';
+import { PlayerParams } from '../player/PlayerParams';
 import { ItemRouteParams } from '../library/LibraryItemDetailPage';
 import { episodeCode } from '../library/LibraryShared';
 
@@ -24,8 +24,7 @@ import { episodeCode } from '../library/LibraryShared';
 @ObservedV2
 export class ResumeBarStore {
   @Trace private currentItem: UpNextItemView | null = null;
-  /** 被叉掉的那条的键：命中就不显示（再看过别的自己回来） */
-  private hiddenKey: string = '';
+  @Trace private hiddenKey: string = '';
   private store: preferences.Preferences | null = null;
   private static readonly storeName: string = 'movieclaw_resume_bar';
   private static readonly hiddenKeyName: string = 'hiddenKey';

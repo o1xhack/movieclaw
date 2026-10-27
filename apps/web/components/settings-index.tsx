@@ -1,5 +1,7 @@
 "use client";
 
+import { useLocale, useTranslations } from "next-intl";
+
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
 
@@ -7,7 +9,7 @@ import { ChevronRightIcon } from "@/components/icons";
 import { settingsSectionGroupsFor } from "@/lib/mock-data";
 import { useActiveExtensionPoints } from "@/lib/use-extension-points";
 import { useSession } from "@/lib/session";
-import { useTheme } from "@/lib/ui-prefs";
+import { useLayout } from "@/lib/ui-prefs";
 
 /**
  * 移动端的设置分区列表页（路由 /settings，基础实现，两个主题共用）。
@@ -24,16 +26,18 @@ import { useTheme } from "@/lib/ui-prefs";
  * 只在有指针的设备上出现，免得点过的行回来后一直亮着。
  */
 export function SettingsIndex() {
+  const locale = useLocale();
+  const t = useTranslations();
   const router = useRouter();
   const { session } = useSession();
   // 分区清单按角色过滤：成员只看到通用组，管理分区没有入口（后端 403 兜底）。
   // 银玻璃不再单列「个人信息」：入口统一为「我的」页的头像卡（同原生 App 的设置目录），
   // /settings/profile 深链照常可用；Netflix 的「我的」页没有头像卡入口，保留这一行
-  const isNetflix = useTheme().structural;
+  const cinema = useLayout() === "cinema";
   const extensionPoints = useActiveExtensionPoints(session.role === "admin");
-  const groups = settingsSectionGroupsFor(session.role, extensionPoints)
+  const groups = settingsSectionGroupsFor(session.role, extensionPoints, locale)
     .map((group) =>
-      isNetflix ? group : { ...group, items: group.items.filter((s) => s.id !== "profile") },
+      cinema ? group : { ...group, items: group.items.filter((s) => s.id !== "profile") },
     )
     .filter((group) => group.items.length > 0);
 
@@ -47,7 +51,7 @@ export function SettingsIndex() {
               <h2 className="px-4 pb-2 text-caption text-[var(--text-muted)]">{group.label}</h2>
             )}
             <nav
-              aria-label={group.label || "设置分区"}
+              aria-label={group.label || t("settings.metadata.sections")}
               className="css-glass overflow-hidden"
             >
               {group.items.map((section, index) => {

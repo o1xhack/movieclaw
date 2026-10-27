@@ -1,9 +1,10 @@
 import { common } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
+import { KeyboardAvoidMode, window } from '@kit.ArkUI';
 import { Theme } from '../theme/AppTheme';
 import { AppModel } from '../common/AppModel';
 import { Permissions } from '../common/Permissions';
 import { ShellChrome } from '../common/ShellChrome';
+import { WindowInsets } from '../common/WindowInsets';
 import { ApiError } from '../api/ApiClient';
 import { MovieClawApi } from '../api/Endpoints';
 import { LlmModelOptionView, SessionMessageAcceptedView, SessionStartPayload, SkillView } from '../api/Models';
@@ -12,7 +13,7 @@ import { AgentAttachment, AgentAttachments } from './AgentAttachments';
 import { AgentCatalog, AgentThinking } from './AgentCatalog';
 import { AgentSessionsSignal } from './AgentSessionsSignal';
 import { AgentSkillText } from './AgentSkills';
-import { ChatParams } from './ChatPage';
+import { ChatParams } from './ChatParams';
 
 /**
  * 「我的」页的 AI 快捷输入（对应 iOS `AgentQuickBar` + `AgentComposer` 新样式）：
@@ -27,8 +28,8 @@ import { ChatParams } from './ChatPage';
 /** 「我的」页列表内容要多让出的高度（快捷输入条 + 悬浮页签胶囊已在 `tabBarInset` 里） */
 export const AGENT_QUICK_CONTENT_EXTRA: number = 60;
 
-/** 快捷输入条在悬浮页签胶囊上方再抬起的高度（胶囊 48 + 抬起 12 + 呼吸 4） */
-const BAR_LIFT: number = 64;
+/** 快捷输入条在悬浮页签胶囊上方抬起的高度（胶囊 barHeight 56 + barBottomMargin 12 + 5px 间距） */
+const BAR_LIFT: number = 73;
 
 /** iOS `AgentComposer` 规范：36 控件、8 间距、外圆角 26、控件底色白 9% */
 const CONTROL: number = 36;
@@ -61,18 +62,30 @@ export struct AgentQuickInput {
   @Local private consentProviders: string[] = [];
   @Local private keyboardInset: number = 0;
   private keyboardWindow: window.Window | null = null;
+  /** 键盘高度回调的引用：off 必须带上它——不带会把同窗口其他组件的监听一并摘掉 */
+  private keyboardCallback: ((height: number) => void) | null = null;
+  private disposed: boolean = false;
+  /** 进入时记下的窗口键盘避让模式，失焦/销毁时还原（默认 OFFSET=整页上抬） */
+  private avoidDefault: KeyboardAvoidMode = KeyboardAvoidMode.OFFSET;
 
   aboutToAppear(): void {
     this.loadModels();
     this.observeKeyboard();
+    try {
+      this.avoidDefault = this.getUIContext().getKeyboardAvoidMode();
+    } catch (e) {
+    }
     AgentAIConsent.load();
   }
 
   aboutToDisappear(): void {
-    if (this.keyboardWindow !== null) {
-      this.keyboardWindow.off('keyboardHeightChange');
+    this.disposed = true;
+    if (this.keyboardWindow !== null && this.keyboardCallback !== null) {
+      this.keyboardWindow.off('keyboardHeightChange', this.keyboardCallback);
+      this.keyboardCallback = null;
       this.keyboardWindow = null;
     }
+    this.setBarAvoid(false);
   }
 
   /** 管理员才显示；整屏页压上来时隐藏（会话页有自己的输入框） */
@@ -96,19 +109,47 @@ export struct AgentQuickInput {
 
   /** 监听输入法高度：弹出把输入条顶上去；收起且没内容时折回一行 */
   private observeKeyboard(): void {
-    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const hostCtx: Context | undefined = this.getUIContext().getHostContext();
+    if (hostCtx === undefined) {
+      return;
+    }
+    const context: common.UIAbilityContext = hostCtx as common.UIAbilityContext;
     window.getLastWindow(context).then((win: window.Window): void => {
+      // 组件可能已在 Promise 落定前销毁：不再注册（否则监听无人解绑，还会回调已销毁组件）
+      if (this.disposed) {
+        return;
+      }
       this.keyboardWindow = win;
-      win.on('keyboardHeightChange', (height: number): void => {
-        const inset: number = height > 0 ? px2vp(height) : 0;
+      this.keyboardCallback = (height: number): void => {
+        let inset: number = 0;
+        if (height > 0) {
+          try {
+            inset = this.getUIContext().px2vp(height);
+          } catch (e) {
+            inset = height / 3;
+          }
+        }
         if (inset === 0 && this.draft.trim().length === 0 && this.attachments.length === 0
           && this.uploadError.length === 0) {
           this.expanded = false;
         }
         this.keyboardInset = inset;
-      });
+      };
+      win.on('keyboardHeightChange', this.keyboardCallback);
     }).catch((): void => {
     });
+  }
+
+  /**
+   * 只抬输入条、不推页面：聚焦时把窗口键盘避让切成 NONE——系统不再上抬整页，
+   * 输入条只用 bottom margin 自己贴到键盘顶；失焦/销毁还原默认。
+   * bindSheet 等弹层不归这个设置管（文档：不作用于 popup），照常避让。
+   */
+  private setBarAvoid(focusIn: boolean): void {
+    try {
+      this.getUIContext().setKeyboardAvoidMode(focusIn ? KeyboardAvoidMode.NONE : this.avoidDefault);
+    } catch (e) {
+    }
   }
 
   // MARK: 动作
@@ -189,7 +230,10 @@ export struct AgentQuickInput {
       this.expanded = false;
       this.navStack.pushPathByName('chat', new ChatParams(accepted.session_id));
     } catch (error) {
-      this.getUIContext().getPromptAction().showToast({ message: '发送失败，请重试' });
+      try {
+        this.getUIContext().getPromptAction().showToast({ message: '发送失败，请重试' });
+      } catch (e2) {
+      }
     } finally {
       this.sending = false;
     }
@@ -204,7 +248,11 @@ export struct AgentQuickInput {
   private async addImages(source: string): Promise<void> {
     this.uploadError = '';
     this.expanded = true;
-    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    const hostCtx2: Context | undefined = this.getUIContext().getHostContext();
+    if (hostCtx2 === undefined) {
+      return;
+    }
+    const context: common.UIAbilityContext = hostCtx2 as common.UIAbilityContext;
     const client = AppModel.shared.client;
     if (client === null) {
       return;
@@ -296,6 +344,12 @@ export struct AgentQuickInput {
   // MARK: 视图
 
   build() {
+    /*
+     * 结构恢复原版：根 Column 是卡片本体（背景/圆角/描边/margin 都在它身上），
+     * 里面一个 Stack 装主体 + 折叠态 overlay（height 100% 让＋/发送垂直居中、
+     * 贴内容区两端；之前误改成 Stack 底对齐 + margin 12，按钮掉底又左移 8）。
+     * 键盘定位保留修复成果：margin 8/73 + translate -59。
+     */
     Column() {
       Stack({ alignContent: Alignment.Center }) {
         // 主体：托盘 + 输入 +（展开时的）工具行。输入框节点不随状态重建（聚焦不丢）
@@ -309,12 +363,14 @@ export struct AgentQuickInput {
             .fontColor(Theme.text)
             .placeholderColor(Theme.textMuted)
             .backgroundColor(Color.Transparent)
-            .padding({
-              left: 14,
-              right: this.expanded ? 14 : 52,
-              top: this.expanded ? 16 : 12,
-              bottom: this.expanded ? 14 : 12
-            })
+          .padding({
+            // 折叠时左右都要给 36 宽的叠放按钮留位（36 + 16 呼吸 = 52），
+            // 否则 placeholder 会钻到 ／发送 按钮底下
+            left: this.expanded ? 14 : 52,
+            right: this.expanded ? 14 : 52,
+            top: this.expanded ? 16 : 12,
+            bottom: this.expanded ? 14 : 12
+          })
             .maxLines(this.expanded ? 6 : 1)
             .barState(BarState.Off)
             .onChange((value: string): void => {
@@ -322,6 +378,10 @@ export struct AgentQuickInput {
             })
             .onFocus((): void => {
               this.expanded = true;
+              this.setBarAvoid(true);
+            })
+            .onBlur((): void => {
+              this.setBarAvoid(false);
             })
 
           if (this.expanded) {
@@ -339,14 +399,16 @@ export struct AgentQuickInput {
         }
         .width('100%')
 
-        // 折叠态：＋ 和发送叠在输入行两端（空位让触摸穿透到输入框）
+        // 折叠态：＋ 和发送叠在输入行两端（空位让触摸穿透到输入框）。
+        // 不能给这行设 height('100%')：父链尺寸都是内容自适应的，百分比高度会
+        // 按松约束的最大值（整页高）解析，把整条撑满屏幕。不设高度时它只有
+        // 按钮高（36），由 Stack 的居中对齐垂直居中，与原版视觉效果相同。
         if (!this.expanded) {
           Row() {
             this.PlusButton()
             this.SendButton()
           }
           .width('100%')
-          .height('100%')
           .justifyContent(FlexAlign.SpaceBetween)
           .hitTestBehavior(HitTestMode.Transparent)
         }
@@ -361,14 +423,24 @@ export struct AgentQuickInput {
       })
     }
     .width('100%')
-    .backgroundColor('rgba(255, 255, 255, 0.05)')
+    // 展开成编辑器时垫实底（同会话页输入区思路），别让列表内容从玻璃底透出来
+    // 影响阅读；折叠小药丸保持玻璃质感
+    .backgroundColor(this.expanded ? Theme.surfaceRaised : 'rgba(255, 255, 255, 0.05)')
     .borderRadius(26)
     .border({ width: 1, color: 'rgba(255, 255, 255, 0.07)' })
+    /*
+     * 键盘定位：聚焦时窗口避让已被切成 NONE（见 setBarAvoid），系统不上抬
+     * 整页，输入条只用 bottom margin 站到键盘顶。keyboardInset 是相对屏幕底
+     * 的键盘高，而这里的 margin 相对容器底（容器被 MainTabsPage 根 Stack 垫了
+     * WindowInsets.bottom 手势条内边距），所以要扣掉它，紧贴键盘；
+     * 键盘收起时回到悬浮页签胶囊上方（胶囊 56 + 底距 12 + 间距 5）。
+     */
     .margin({
       left: 12,
       right: 12,
-      // 键盘弹出时贴键盘；否则抬到悬浮页签胶囊上方
-      bottom: this.keyboardInset > 0 ? 8 : BAR_LIFT
+      bottom: this.keyboardInset > 0
+        ? Math.max(0, this.keyboardInset - WindowInsets.bottom)
+        : BAR_LIFT
     })
     .visibility(this.visible() ? Visibility.Visible : Visibility.None)
     .bindSheet($$this.showConsent, this.ConsentSheet(), {

@@ -77,11 +77,15 @@ data class AudioTrackView(
 )
 
 /**
- * 首次初始化状态：前端据此决定进引导页（/setup）还是登录页（/login）。
+ * 首次初始化状态及公开的原生设备登录能力，不包含账号或凭据信息。
  */
 @Serializable
 data class BootstrapStatus(
     @SerialName("initialized") val initialized: Boolean = false,
+    /**
+     * 服务端接受的原生 App 设备类型；旧服务端可能不提供
+     */
+    @SerialName("native_device_kinds") val nativeDeviceKinds: List<String>? = null,
 )
 
 /**
@@ -171,6 +175,8 @@ data class ClientCapabilityIn(
     @SerialName("dolby_vision_profiles") val dolbyVisionProfiles: List<Long>? = null,
     @SerialName("dolby_vision_base_layer_profiles") val dolbyVisionBaseLayerProfiles: List<Long>? = null,
     @SerialName("dolby_vision_record_audit") val dolbyVisionRecordAudit: Boolean? = null,
+    @SerialName("mp4_sample_limit") val mp4SampleLimit: Long? = null,
+    @SerialName("hevc_transcode") val hevcTranscode: Boolean? = null,
 )
 
 /**
@@ -425,7 +431,7 @@ data class CollectionView(
 @Serializable
 data class DeviceAuthorizeRequest(
     /**
-     * 客户端形态：worker（转码 Worker）、cli（命令行 / Agent）、tvos（Apple TV App）、macos（Mac App）、androidtv（Android TV App）
+     * 客户端形态：worker（转码 Worker）、cli（命令行 / Agent）、tvos（Apple TV App）、macos（Mac App）、windows（Windows App）、androidtv（Android TV App）
      */
     @SerialName("client_type") val clientType: String,
     /**
@@ -805,6 +811,7 @@ data class HealthResponse(
     @SerialName("spec_hash") val specHash: String = "",
     @SerialName("version") val version: String? = null,
     @SerialName("instance_id") val instanceId: String? = null,
+    @SerialName("proof") val proof: String? = null,
 )
 
 /**
@@ -1141,6 +1148,25 @@ data class LibraryFileView(
 )
 
 /**
+ * 海报墙 A-Z 索引条的一档（按标题排序下的首字母分组）。
+ */
+@Serializable
+data class LibraryIndexEntryView(
+    /**
+     * 首字母档：A-Z，落不进的（数字/符号/假名等）为 #
+     */
+    @SerialName("initial") val initial: String = "",
+    /**
+     * 该档的条目数
+     */
+    @SerialName("count") val count: Long = 0,
+    /**
+     * 该档第一格在按标题排序中的位置——即 /items?sort=title&offset= 的取值
+     */
+    @SerialName("offset") val offset: Long = 0,
+)
+
+/**
  * 剧集库海报 hover 的在位库存完整度摘要。
  */
 @Serializable
@@ -1424,6 +1450,24 @@ data class LibraryRecentAdditionView(
     @SerialName("complete_season") val completeSeason: Boolean = false,
 )
 
+/**
+ * 筛空之后的出路。
+ * 不渲染空墙，而是告诉用户「放宽哪一条能救回多少部」。**只列救得回内容的
+ * 条件**——多维交叉时经常出现"去掉它还是 0 部"的剔除项，把它们摆出来是
+ * 噪音不是建议；一条都救不回时 suggestions 为空，前端只留「清空全部条件」。
+ */
+@Serializable
+data class LibraryRelaxView(
+    /**
+     * 当前条件下的命中数（调用方通常在它为 0 时才用本接口）
+     */
+    @SerialName("total") val total: Long = 0,
+    /**
+     * 按能救回的数量倒序，最多三条
+     */
+    @SerialName("suggestions") val suggestions: List<RelaxSuggestionView> = emptyList(),
+)
+
 @Serializable
 data class LibrarySearchHit(
     @SerialName("item") val item: LibraryItemView = LibraryItemView(),
@@ -1440,6 +1484,8 @@ data class LibrarySearchMatch(
     @SerialName("source_field") val sourceField: String = "",
     @SerialName("matched_name") val matchedName: String = "",
     @SerialName("label") val label: String = "",
+    @SerialName("label_key") val labelKey: String? = null,
+    @SerialName("label_params") val labelParams: JsonObject? = null,
     @SerialName("person_id") val personId: Long? = null,
 )
 
@@ -2518,6 +2564,33 @@ data class RefreshActiveView(
 )
 
 /**
+ * 筛空时的一条放宽建议（docs/design/library-filtering.md 3.3）。
+ */
+@Serializable
+data class RelaxSuggestionView(
+    /**
+     * 维度：genres / countries / decades / watch
+     */
+    @SerialName("dim") val dim: String = "",
+    /**
+     * 维度展示名：类型 / 地区 / 年代 / 观看
+     */
+    @SerialName("dim_label") val dimLabel: String = "",
+    /**
+     * 要去掉的那个取值
+     */
+    @SerialName("value") val value: String = "",
+    /**
+     * 该取值的展示名
+     */
+    @SerialName("label") val label: String = "",
+    /**
+     * 去掉它之后能找回多少部（恒 > 0）
+     */
+    @SerialName("count") val count: Long = 0,
+)
+
+/**
  * 进行中扫描/整理的实时进度（前端在库封面上画进度环，两种任务共用）。
  * ``phase`` 是必填的：一次"扫描"内部分好几段（盘点 → 逐文件入账 →
  * 补齐图片资产），分子分母各段各算。前端**必须**按阶段选文案，否则
@@ -2748,6 +2821,7 @@ data class TrickplayView(
  */
 @Serializable
 data class UiPreferencesSetting(
+    @SerialName("language") val language: String = "",
     /**
      * 主题 id，取值见前端 lib/themes.ts 的注册表（silver / netflix）。存纯字符串并放宽校验：未知值由前端 normalizeThemeId 兜底为默认主题，老后端读到新主题 id 也不会整体拒绝（前向兼容）。
      */

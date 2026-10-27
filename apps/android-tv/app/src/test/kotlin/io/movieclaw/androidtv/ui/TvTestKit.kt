@@ -31,8 +31,12 @@ import java.io.IOException
 /** 电视 1920×1080（1pt = 1px，同 McMetrics 的画布） */
 const val TV_QUALIFIERS = "w960dp-h540dp-land-television-xhdpi"
 
-/** 假服务端：按路径给现成的对象，其余请求一律当断网 */
-class FakeTransport(private val routes: Map<String, Any>) : ApiTransport {
+/**
+ * 假服务端：按路径给现成的对象，其余请求一律当断网。
+ * 值也可以是 [Responder]：按这次请求的查询参数现算（按 offset 切片的海报墙、按筛选条件变的计数）；
+ * [delays] 里的路径晚这么多毫秒才答（模拟真机网络延迟）
+ */
+class FakeTransport(private val routes: Map<String, Any>, private val delays: Map<String, Long> = emptyMap()) : ApiTransport {
     /** 收到过的请求路径（按先后） */
     val requested = java.util.Collections.synchronizedList(mutableListOf<String>())
     /** 收到过的请求（路径 + 查询参数，按先后）：同一路径带不同参数的请求（相似推荐排除 / 不排除同系列）要分开看 */
@@ -45,8 +49,15 @@ class FakeTransport(private val routes: Map<String, Any>) : ApiTransport {
     ): T {
         requested += path
         queries += path to query
-        return (routes[path] ?: throw IOException("offline: $method $path")) as T
+        delays[path]?.let { kotlinx.coroutines.delay(it) }
+        val route = routes[path] ?: throw IOException("offline: $method $path")
+        return (if (route is Responder) route.respond(query.toMap()) else route) as T
     }
+}
+
+/** 按查询参数现算的假响应 */
+fun interface Responder {
+    fun respond(query: Map<String, String>): Any
 }
 
 /** 摆好的电视界面：依赖图（开关设置用）与假服务端（看发了哪些请求） */
@@ -58,11 +69,11 @@ fun episodes(count: Int, played: Int = 0, owned: (Long) -> Boolean = { true }) =
 
 typealias TvRule = AndroidComposeTestRule<*, ComponentActivity>
 
-/** 摆上电视界面：主题、依赖图、已登录账号（接口走 [routes] 假服务端） */
-fun TvRule.setTvContent(routes: Map<String, Any>, content: @Composable () -> Unit): TvEnv {
+/** 摆上电视界面：主题、依赖图、已登录账号（接口走 [routes] 假服务端，[delays] 见 [FakeTransport]） */
+fun TvRule.setTvContent(routes: Map<String, Any>, delays: Map<String, Long> = emptyMap(), content: @Composable () -> Unit): TvEnv {
     val graph = AppGraph(activity.application)
     val server = ServerAddress("http://127.0.0.1:9".toHttpUrl())
-    val transport = FakeTransport(routes)
+    val transport = FakeTransport(routes, delays)
     val session = AccountSession(server, "token", SessionView(username = "u", nickname = "我"), McApi(transport))
     setContent {
         McTheme {

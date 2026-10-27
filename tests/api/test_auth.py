@@ -48,7 +48,7 @@ def client(tmp_path, monkeypatch):
     from movieclaw_api.app import create_app
 
     app = create_app()
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Accept-Language": "zh-Hans"}) as c:
         yield c
 
     reset_setting_store()
@@ -75,6 +75,18 @@ def test_bootstrap_status_flips_after_init(client: TestClient) -> None:
     assert resp.json()["data"]["username"] == "admin"
 
     assert client.get(f"{_AUTH}/bootstrap").json()["data"]["initialized"] is True
+
+
+def test_bootstrap_reports_static_native_app_kinds_without_account_data(client: TestClient) -> None:
+    expected = {"ios", "tvos", "macos", "android", "androidtv", "windows"}
+    before = client.get(f"{_AUTH}/bootstrap").json()["data"]
+    assert set(before) == {"initialized", "native_device_kinds"}
+    assert before["initialized"] is False
+    assert set(before["native_device_kinds"]) == expected
+    assert _bootstrap(client).status_code == 200
+    anonymous = TestClient(client.app)
+    after = anonymous.get(f"{_AUTH}/bootstrap").json()["data"]
+    assert after == {"initialized": True, "native_device_kinds": before["native_device_kinds"]}
 
 
 def test_bootstrap_rejects_second_attempt(client: TestClient) -> None:
@@ -318,6 +330,11 @@ _PUBLIC_ALLOWLIST = {
     ("POST", "/api/v1/auth/device/token"),
     ("GET", "/api/v1/appearance"),  # 登录页需要背景图地址
     ("GET", "/api/v1/appearance/backdrops/{backdrop_id}"),  # 登录页背景图文件
+    # 网页主题的样式与资源（docs/design/theme-plugins.md §4.6）：登录页、初始化页也要按所选
+    # 主题渲染，样式表挂在根布局的 <head> 里、没有登录态可带；只托管样式 / 图片 / 字体并带沙箱 CSP。
+    # 主题的外框组件（JS）在路由里单独要求登录，主题目录 /ui/themes 同样要登录
+    ("GET", "/api/v1/ui/themes.css"),
+    ("GET", "/api/v1/ui/themes/{theme_id}/{path}"),
     # 影片分享的访客通道（docs/design/media-share.md §4.3）：访客没有账号，
     # 每个端点自带 require_share_access（slug 有效 + 密码已解锁）。匿名请求
     # 一个不存在的 slug 得到 404 而不是 401，与「分享不存在」不可区分。
@@ -356,6 +373,7 @@ def fill_path_params(path: str) -> str:
         .replace("{site_id}", "mteam")
         .replace("{history_id}", "1")
         .replace("{backdrop_id}", "f" * 32)
+        .replace("{theme_id}", "nope-theme")
         .replace("{attachment_id}", "f" * 32)
         .replace("{downloader_id}", "1")
         .replace("{category}", "anime")
@@ -378,6 +396,7 @@ def fill_path_params(path: str) -> str:
         .replace("{media_item_id}", "1")
         .replace("{rule_id}", "1")
         .replace("{entry_id}", "1")
+        .replace("{plugin_id}", "1")
         .replace("{file_id}", "1")
         .replace("{token_id}", "1")
         .replace("{notice_id}", "1")

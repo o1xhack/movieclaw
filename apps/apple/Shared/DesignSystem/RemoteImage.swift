@@ -230,7 +230,7 @@ extension ImageWidth {
 
 /// 旧的图片尺寸预设（同 Web `lib/image-proxy.ts` 的 ImageVariant）：按「设备 × 场景」命名，尺寸按网页定，
 /// iPhone 3 倍屏、4K 电视上都偏小。客户端已全部改用宽度阶梯（`ImageWidth`），这里只为旧路径保留，新代码不要再用
-@available(*, deprecated, message: "改用宽度阶梯：api.image(raw, width: ImageWidth.points(...))")
+@available(*, deprecated, message: "改用宽度阶梯：api.image(raw, width: ImageWidth.points(...))") // i18n-ignore: developer message
 nonisolated enum ImageVariant: String {
     case landscapeCard = "landscape-card"
     case posterCard = "poster-card"
@@ -261,7 +261,7 @@ nonisolated extension ServerAddress {
     }
 
     /// 旧的按预设取图（只有刮削资产与代理认）；保留给旧路径
-    @available(*, deprecated, message: "改用 imageURL(_:width:)")
+    @available(*, deprecated, message: "改用 imageURL(_:width:)") // i18n-ignore: developer message
     func imageURL(_ raw: String?, variant: ImageVariant?) -> URL? {
         guard var components = imageComponents(raw) else { return nil }
         if let variant, components.path.hasSuffix("/images/proxy") || components.path.contains("/images/assets/") {
@@ -402,13 +402,16 @@ private nonisolated struct AuthorizedDataLoader: DataLoading {
            let token = AuthTokenRegistry.shared.token(for: url) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        // 图片地址按登录地址拼（缓存键、离线图片都认它），真正去取时换成当前地址（在家内网、出门外网）
+        let original = request.url
+        if let url = original { request.url = ServerRoutes.shared.rewrite(url) }
         #if os(iOS)
         // 离线下载的本机图片（docs/design/offline-download.md §4）：离线模式直接用、不发请求；在线时请求失败才回落
-        if let url = request.url, OfflineModeFlag.isOffline, let data = OfflineImages.shared.localData(for: url) {
+        if let url = original, OfflineModeFlag.isOffline, let data = OfflineImages.shared.localData(for: url) {
             Self.deliver(data, url: url, didReceiveData: didReceiveData, completion: completion)
             return RetryingTask()
         }
-        let completion: @Sendable (Error?) -> Void = { [url = request.url] error in
+        let completion: @Sendable (Error?) -> Void = { [url = original] error in
             if error != nil, let url, let data = OfflineImages.shared.localData(for: url) {
                 Self.deliver(data, url: url, didReceiveData: didReceiveData, completion: completion)
             } else {
