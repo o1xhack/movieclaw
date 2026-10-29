@@ -1,6 +1,6 @@
 # Luca Cinema 个人构建与安装记录
 
-当前源码基于 MovieClaw v0.44.0 / iOS 0.12.0，本地构建为 0.12.0（14）。最近已验证的内部 TestFlight 仍为 0.11.0（13），本轮尚未上传；最低 iOS 26。
+当前源码基于 MovieClaw v0.44.0 / iOS 0.12.0；0.12.0（14）已上传并验证为 VALID / IN_BETA_TESTING，仍使用原 Luca Personal 内部 TestFlight 组；最低 iOS 26。
 
 当前订阅接入只在 Web / 电脑助手添加和管理；iOS 读取服务器已有模型，并保留模型与思考强度选择。下方 0.7.0 手机内授权记录属于历史版本，已由本版替代。
 
@@ -226,6 +226,6 @@ NAS 基于官方 0.44.0 镜像摘要 `sha256:42bd98d35062d93bc5023a242c085871adf
 
 106 项后端回归、7 项私人离线专项和 11 项真实宿主插件集成通过（Trakt 模拟）。iOS 使用 Xcode 27.1 / iOS 27.1 SDK，604 项 Swift Testing、1 项中文 XCTest 和 22 项英文 XCTest 分语言复验通过；中文时间用例使用其预期的 Asia/Shanghai 环境。首轮混合语种/默认时区的失败日志保留，没有修改产品时间语义来迎合测试。8 项依赖锁定测试通过，AetherEngine 为 `0912813a54e9febe22be07e5c337bb58dfa7b2e5`，FFmpegBuild 为 3.10.1。
 
-本地 0.12.0（14）Archive 与 IPA 导出完成，主 App 和两个通知扩展的版本、Bundle ID、严格签名、许可证及隐私清单已核对。本轮未上传 TestFlight、未提交 App Store 审核；真实手机安装/登录/播放仍待 QA，手机现有安装不会因源码同步自动更新。
+本地 0.12.0（14）Archive 与 IPA 导出完成，主 App 和两个通知扩展的版本、Bundle ID、严格签名、许可证及隐私清单已核对。2026-10-29 按用户要求上传同一签名包（SHA256 `a74c4ed6ec392738cbf53a0f4818c2ea3f15086011ee86d6d2df1d10cde6ef6c`），upload/build ID 为 `75c93c2a-dbad-477f-aaac-2f606c77d619`。Apple 处理完成，构建为 VALID、内部状态 IN_BETA_TESTING；组关系完整回读确认只有原 Luca Personal 内部组（`9bcb683d-a22a-47fc-8d3c-ff4206135f25`，all-builds），没有加入外部组。Apple 处理后的图标已查看，仍为正确 LC 图标。可以通过原 TestFlight 更新；未提交 App Store 审核，真实手机安装/登录/播放仍待 QA。
 
-证据及产物目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw-upgrade/v044-20261029`。归档在 `ios-build14/LucaCinema.xcarchive`，导出包在 `ios-build14/Export`，结果为 `ios-tests/TestsChinese.xcresult` 和 `TestsEnglish.xcresult`。NAS 构建、迁移、验证和备份材料均在 `/volume1/docker/movieclaw/upgrade044-20261029`。
+证据及产物目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw-upgrade/v044-20261029`。归档在 `ios-build14/LucaCinema.xcarchive`，导出包在 `ios-build14/Export`，结果为 `ios-tests/TestsChinese.xcresult` 和 `TestsEnglish.xcresult`；TestFlight 上传回执、处理结果、组关系及 Apple 图标在 `testflight14`。NAS 构建、迁移、验证和备份材料均在 `/volume1/docker/movieclaw/upgrade044-20261029`。
