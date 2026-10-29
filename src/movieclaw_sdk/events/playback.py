@@ -24,7 +24,12 @@ class Playback(Frozen):
     """本机播放记录编号；补传快照共享此编号。流式播放为 None。"""
 
 
-class PlaybackStopped(Playback):
+class PlaybackCompleted(Playback):
+    watch_source_ids: tuple[str, ...] = ()
+    """本次观看的日志标识，与 catalog watches[].source_ids 对应；旧事件为空。"""
+
+
+class PlaybackStopped(PlaybackCompleted):
     completed: bool = False
     """这次停止时刚好看完（越过已看阈值），同时也会有一个 ``playback.completed``。"""
 
@@ -48,15 +53,21 @@ PLAYBACK_STARTED = define(
     version="2.0",
 )
 PLAYBACK_STOPPED = define(
-    "playback.stopped", PlaybackStopped, title="停止播放", group="播放", sensitive=True
+    "playback.stopped",
+    PlaybackStopped,
+    title="停止播放",
+    group="播放",
+    sensitive=True,
+    version="1.1",
 )
 PLAYBACK_COMPLETED = define(
     "playback.completed",
-    Playback,
+    PlaybackCompleted,
     title="看完",
     group="播放",
     doc="看完（越过已看阈值）",
     sensitive=True,
+    version="1.1",
 )
 PLAYBACK_PROGRESS = define(
     "playback.progress",

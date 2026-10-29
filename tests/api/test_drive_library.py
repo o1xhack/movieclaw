@@ -7,7 +7,8 @@
   样片跳过并计数，非视频不算；纳管报告；入账的文件立刻可以取流；
 - 复查：网盘上删了的标缺失，挪了位置的认回原行（台账路径不变），新出现的入账，删了又还原的认回来；
 - 本地扫描不碰只在网盘上的行：对账不标缺失，重新下载同一版本不会劫持它；
-- 操作动态：删掉的已入账文件直接标缺失，落在库目录里的变化只重新列那个目录；
+- 操作动态：删掉的已入账文件直接标缺失，自己传上去的跳过，其余只列事发的那个目录（路径由列举
+  给的路径链定），定不了的（挪出了库、插件没给路径链）整个文件夹列一遍；
 - 目录选择器、重叠校验、账号在用时不让删、拿掉目录只删台账。
 """
 
@@ -84,12 +85,26 @@ class FakeDrive(DriveBackend):
         return [RemoteDir(**d) for d in self._load()["dirs"].get(dir_id, [])]
 
     async def list_tree(self, account, dir_id):
-        tree = self._load()["trees"].get(dir_id)
+        state = self._load()
+        tree = state["trees"].get(dir_id)
         if tree is None:
             raise NotFound("目录不存在")
+        state.setdefault("listed", []).append(dir_id)
+        self.state.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        # 路径链：paths 记着每个目录在网盘上的完整路径；no_path 模拟不给路径链的旧插件
+        paths = {} if state.get("no_path") else state.get("paths", {})
+        chain = []
+        if dir_id in paths:
+            by_path = {path: d for d, path in paths.items()}
+            parts = paths[dir_id].split("/")
+            chain = [RemoteDir(remote_id="0", name="根目录")] + [
+                RemoteDir(remote_id=by_path["/".join(parts[: i + 1])], name=name)
+                for i, name in enumerate(parts)
+            ]
         return RemoteTree(
             files=tuple(RemoteFile(**f) for f in tree["files"]),
             dir_ids=tuple(tree.get("dir_ids", ())),
+            path=tuple(chain),
         )
 
     async def changes(self, account, cursor):
@@ -218,6 +233,13 @@ def _initial_state() -> dict:
                 "dir_ids": ["d-dune", "d-opp", "d-bd", "d-iso"],
             },
             "d-tv": {"files": [], "dir_ids": []},
+        },
+        "paths": {
+            "d-media": "影视",
+            "d-movies": "影视/电影",
+            "d-tv": "影视/剧集",
+            "d-dune": "影视/电影/沙丘2 (2024)",
+            "d-opp": "影视/电影/奥本海默 (2023)",
         },
         "feed": [],
     }
@@ -501,44 +523,322 @@ def test_local_scans_leave_cloud_only_rows_alone(client, tmp_path):
     assert gateway.usage_today(client.account_id) > calls  # type: ignore[attr-defined]
 
 
-def test_change_feed_marks_deletions_and_relists_only_touched_folders(client, tmp_path):
+def _listed(client: TestClient) -> list[str]:
+    """从上次调用以来列过哪些目录（并清空记录）。"""
+    listed: list[str] = []
+
+    def take(data):
+        listed.extend(data.pop("listed", []))
+
+    _edit_state(client, take)
+    return listed
+
+
+def _feed(client: TestClient, *events: dict) -> None:
+    def edit(data):
+        seq = data["feed"][-1]["seq"] if data["feed"] else 0
+        data["feed"] += [{"seq": seq + i + 1, **e} for i, e in enumerate(events)]
+
+    _edit_state(client, edit)
+
+
+def _sync(client: TestClient, library_id: int) -> None:
+    from movieclaw_api.services.library import cloud
+
+    call(client, cloud.poll_drive_changes)
+    _wait_idle(client, library_id)
+
+
+def test_change_feed_marks_deletions_and_lists_only_the_changed_dir(client, tmp_path):
     from movieclaw_api.services.library import cloud
 
     view = _create_library(client, tmp_path)
     library_id = view["id"]
+    [folder] = view["cloud_folders"]
     # 第一次拉动态只记起点
     call(client, cloud.poll_drive_changes)
+    _listed(client)
 
     def edit(data):
         data["trees"]["d-movies"]["files"].append(
             _file("f-inception", "盗梦空间 (2010)/Inception.2010.mkv")
         )
-        data["feed"] += [
-            {"seq": 1, "kind": "removed", "remote_id": "f-opp", "parent_id": "d-opp"},
-            {
-                "seq": 2,
-                "kind": "dir_created",
-                "remote_id": "d-inc",
-                "is_dir": True,
-                "name": "盗梦空间 (2010)",
-                "parent_id": "d-movies",
-            },
-            {"seq": 3, "kind": "added", "remote_id": "f-inception", "parent_id": "d-inc"},
-            # 库外的变化不理
-            {"seq": 4, "kind": "added", "remote_id": "f-other", "parent_id": "d-elsewhere"},
-        ]
+        data["trees"]["d-inc"] = {"files": [_file("f-inception", "Inception.2010.mkv")]}
+        data["paths"]["d-inc"] = "影视/电影/盗梦空间 (2010)"
 
     _edit_state(client, edit)
+    _feed(
+        client,
+        {"kind": "removed", "remote_id": "f-opp", "parent_id": "d-opp"},
+        {
+            "kind": "dir_created",
+            "remote_id": "d-inc",
+            "is_dir": True,
+            "name": "盗梦空间 (2010)",
+            "parent_id": "d-movies",
+        },
+        {"kind": "added", "remote_id": "f-inception", "parent_id": "d-inc"},
+        # 库外的变化不理
+        {"kind": "added", "remote_id": "f-other", "parent_id": "d-elsewhere"},
+    )
     call(client, cloud.poll_drive_changes)
     rows = ledger(client, library_id)
     # 删掉的已入账文件：不用列目录，直接标缺失
     assert rows["f-opp"]["state"] == "missing" and rows["f-opp"]["replica_state"] == "lost"
-    # 落在库目录里的变化：排了一个只列网盘的扫描，跑完新文件入账
+    # 新目录和它里面的新文件：只列这个新目录（路径链定出它在文件夹下的位置），新文件入账
     view = _wait_idle(client, library_id)
+    assert _listed(client) == ["d-inc"]
     rows = ledger(client, library_id)
-    assert rows["f-inception"]["media_item_id"] is not None
+    inception = rows["f-inception"]
+    assert inception["media_item_id"] is not None
+    assert inception["remote_path"] == "影视/电影/盗梦空间 (2010)/Inception.2010.mkv"
+    assert inception["path"] == str(
+        tmp_path
+        / "staging"
+        / ".movieclaw-cloud"
+        / str(client.account_id)  # type: ignore[attr-defined]
+        / "影视/电影/盗梦空间 (2010)/Inception.2010.mkv"
+    )
+    # 只列了子目录：文件夹的列举时间与报告不变（每周复查照旧到期）
+    assert view["cloud_folders"][0]["listed_at"] == folder["listed_at"]
     # 再拉一次没有新动态：什么都不做
     assert call(client, cloud.apply_changes, client.account_id, [], []) == set()  # type: ignore[attr-defined]
+
+
+def test_change_feed_skips_own_uploads_and_lists_only_where_things_changed(client, tmp_path):
+    from movieclaw_api.services.drives import gateway
+
+    view = _create_library(client, tmp_path)
+    library_id = view["id"]
+    account_id = client.account_id  # type: ignore[attr-defined]
+    _sync(client, library_id)  # 记下起点
+    _listed(client)
+    before = ledger(client, library_id)
+
+    # 已入账、核验过的文件来了「新增」（我们自己传上去的、范围扫描刚入过账的）：只拉动态，不列目录
+    _feed(client, {"kind": "added", "remote_id": "f-dune", "parent_id": "d-dune"})
+    calls = gateway.usage_today(account_id)
+    _sync(client, library_id)
+    assert gateway.usage_today(account_id) - calls == 1
+    assert _listed(client) == []
+    assert ledger(client, library_id) == before
+
+    # 已有目录里来了新文件（第三方转存）：只列这个目录
+    def add(data):
+        data["trees"]["d-movies"]["files"].append(
+            _file("f-dune-hd", "沙丘2 (2024)/Dune.Part.Two.2024.1080p.mkv", 2_000_000_000)
+        )
+        data["trees"]["d-dune"] = {
+            "files": [
+                _file("f-dune", "Dune.Part.Two.2024.2160p.mkv"),
+                _file("f-dune-hd", "Dune.Part.Two.2024.1080p.mkv", 2_000_000_000),
+                _file("f-sample", "sample.mkv", 50_000_000),
+            ]
+        }
+
+    _edit_state(client, add)
+    _feed(client, {"kind": "added", "remote_id": "f-dune-hd", "parent_id": "d-dune"})
+    _sync(client, library_id)
+    assert _listed(client) == ["d-dune"]
+    rows = ledger(client, library_id)
+    assert rows["f-dune-hd"]["remote_path"] == "影视/电影/沙丘2 (2024)/Dune.Part.Two.2024.1080p.mkv"
+    assert rows["f-dune-hd"]["replica_state"] == "verified"
+    # 目录外的行不动
+    assert rows["f-opp"] == before["f-opp"] and rows["f-noname"] == before["f-noname"]
+
+    # 已入账的文件改了名：只列它所在的目录，展示路径跟上，台账行不变
+    def rename(data):
+        name = "Oppenheimer.2023.1080p.REMUX.mkv"
+        for f in data["trees"]["d-movies"]["files"]:
+            if f["remote_id"] == "f-opp":
+                f.update(name=name, rel_path=f"奥本海默 (2023)/{name}")
+        data["trees"]["d-opp"] = {"files": [_file("f-opp", name, 3_000_000_000)]}
+
+    _edit_state(client, rename)
+    _feed(
+        client,
+        {
+            "kind": "renamed",
+            "remote_id": "f-opp",
+            "name": "Oppenheimer.2023.1080p.REMUX.mkv",
+            "parent_id": "d-opp",
+        },
+    )
+    _sync(client, library_id)
+    assert _listed(client) == ["d-opp"]
+    opp = ledger(client, library_id)["f-opp"]
+    assert opp["remote_path"] == "影视/电影/奥本海默 (2023)/Oppenheimer.2023.1080p.REMUX.mkv"
+    assert opp["id"] == before["f-opp"]["id"] and opp["state"] == "in_place"
+
+
+def test_change_feed_lists_the_whole_folder_when_it_cannot_tell_where(client, tmp_path):
+    view = _create_library(client, tmp_path)
+    library_id = view["id"]
+    _sync(client, library_id)
+    _listed(client)
+
+    # 插件没给路径链（旧版）：子目录列完定不了位置，改列整个文件夹，新文件照样入账
+    def add(data):
+        data["no_path"] = True
+        data["trees"]["d-movies"]["files"].append(
+            _file("f-dune-hd", "沙丘2 (2024)/Dune.Part.Two.2024.1080p.mkv", 2_000_000_000)
+        )
+        data["trees"]["d-dune"] = {
+            "files": [_file("f-dune-hd", "Dune.Part.Two.2024.1080p.mkv", 2_000_000_000)]
+        }
+
+    _edit_state(client, add)
+    _feed(client, {"kind": "added", "remote_id": "f-dune-hd", "parent_id": "d-dune"})
+    _sync(client, library_id)
+    assert _listed(client) == ["d-dune", "d-movies"]
+    rows = ledger(client, library_id)
+    assert rows["f-dune-hd"]["remote_path"] == "影视/电影/沙丘2 (2024)/Dune.Part.Two.2024.1080p.mkv"
+
+    # 整个目录挪出了库：列它时路径链里没有挂着的文件夹，改列整个文件夹，里面的文件标缺失
+    def move_out(data):
+        data["no_path"] = False
+        data["paths"]["d-elsewhere"] = "其他"
+        data["paths"]["d-opp"] = "其他/奥本海默 (2023)"
+        data["trees"]["d-opp"] = {
+            "files": [_file("f-opp", "Oppenheimer.2023.1080p.mkv", 3_000_000_000)]
+        }
+        files = data["trees"]["d-movies"]["files"]
+        files[:] = [f for f in files if f["remote_id"] != "f-opp"]
+
+    _edit_state(client, move_out)
+    _feed(
+        client,
+        {
+            "kind": "moved",
+            "remote_id": "d-opp",
+            "is_dir": True,
+            "name": "奥本海默 (2023)",
+            "parent_id": "d-elsewhere",
+        },
+    )
+    _sync(client, library_id)
+    assert _listed(client) == ["d-opp", "d-movies"]
+    opp = ledger(client, library_id)["f-opp"]
+    assert opp["state"] == "missing" and opp["replica_state"] == "lost"
+
+
+def _mount_ops_caller(client: TestClient, entry_id: str, permissions: tuple[str, ...]):
+    """运行中挂一个只拿宿主操作入口的插件，返回它的 OpsClient（同 test_host_ops）。"""
+    from movieclaw_api.plugins.keys import HOST_OPS
+    from movieclaw_kernel import Entry, plugin
+
+    holder: dict = {}
+
+    @plugin(entry_id, title=entry_id, inject=(HOST_OPS,), permissions=permissions)
+    async def caller(ctx) -> None:
+        holder["ops"] = await ctx.use(HOST_OPS).client(ctx)
+
+    kernel = client.app.state.kernel  # type: ignore[attr-defined]
+    fiber = client.portal.call(kernel.mount, Entry(entry_id, caller, source="builtin"))  # type: ignore[attr-defined]
+    assert fiber.state.value == "active", fiber.error
+    return holder["ops"]
+
+
+def test_scan_with_cloud_paths_lists_only_those_subtrees(client, tmp_path):
+    """插件把新片转存进网盘后点名子目录扫描（#987）：只列点名的子树，判缺失只在子树里，
+    不动挂着的文件夹的报告与列举时间，也不遍历本地、不补探存量规格。"""
+    from movieclaw_api.services.drives import gateway
+
+    view = _create_library(client, tmp_path)
+    library_id = view["id"]
+    [folder] = view["cloud_folders"]
+    before = ledger(client, library_id)
+
+    def edit(data):
+        data["dirs"]["d-movies"] = [
+            {"remote_id": "d-dune", "name": "沙丘2 (2024)"},
+            {"remote_id": "d-opp", "name": "奥本海默 (2023)"},
+            {"remote_id": "d-inc", "name": "盗梦空间 (2010)"},
+        ]
+        files = data["trees"]["d-movies"]["files"]
+        # 子树外的变化（奥本海默被删）：这次不该被发现
+        files[:] = [f for f in files if f["remote_id"] not in ("f-opp", "f-dune")]
+        files.append(_file("f-inception", "盗梦空间 (2010)/Inception.2010.mkv"))
+        data["trees"]["d-movies"]["dir_ids"].append("d-inc")
+        # 点名的两棵子树：新转存进来的盗梦空间；沙丘2 的正片被删了
+        data["trees"]["d-inc"] = {"files": [_file("f-inception", "Inception.2010.mkv")]}
+        data["trees"]["d-dune"] = {"files": [_file("f-sample", "sample.mkv", 50_000_000)]}
+
+    _edit_state(client, edit)
+    # 真实调用方：插件只拿 library.scan.start 授权，经宿主操作发起
+    ops = _mount_ops_caller(client, "test.cloud-import", ("library.scan.start",))
+    calls = gateway.usage_today(client.account_id)  # type: ignore[attr-defined]
+    started = call(
+        client,
+        ops.call,
+        "library.scan.start",
+        {
+            "library_id": library_id,
+            "body": {"cloud_paths": ["影视/电影/盗梦空间 (2010)", "/影视/电影/沙丘2 (2024)/"]},
+        },
+    )
+    job_id = started["job_id"]
+    after = _wait_idle(client, library_id)
+    job = client.get(f"/api/v1/jobs/{job_id}").json()["data"]
+    assert job["status"] == "succeeded", job
+    # 每棵子树：逐级找目录 id 一次 + 整树列举一次；挂着的文件夹整树没有列
+    assert gateway.usage_today(client.account_id) - calls == 4  # type: ignore[attr-defined]
+
+    rows = ledger(client, library_id)
+    inception = rows["f-inception"]
+    staging = tmp_path / "staging"
+    # 子树里的相对路径接上了子目录前缀：台账路径、网盘路径与整树列举入账的一致
+    assert inception["path"] == str(
+        staging
+        / ".movieclaw-cloud"
+        / str(client.account_id)
+        / "影视/电影/盗梦空间 (2010)"
+        / "Inception.2010.mkv"
+    )
+    assert inception["remote_path"] == "影视/电影/盗梦空间 (2010)/Inception.2010.mkv"
+    assert inception["media_item_id"] is not None and inception["local_bytes"] is False
+    assert inception["replica_state"] == "verified"
+    # 子树里不见了的标缺失；子树外的（奥本海默）完全不动
+    assert rows["f-dune"]["state"] == "missing" and rows["f-dune"]["replica_state"] == "lost"
+    assert rows["f-opp"] == before["f-opp"]
+    assert rows["f-noname"] == before["f-noname"]
+    # 文件夹的报告与列举时间是整个文件夹的结论，这次不改
+    [folder_after] = after["cloud_folders"]
+    assert folder_after["listed_at"] == folder["listed_at"]
+    assert folder_after["report"] == folder["report"]
+
+    # 新目录记进了文件夹：之后这个目录里的操作动态能认出来
+    async def dir_ids():
+        from movieclaw_db.engine import get_database
+        from movieclaw_db.models import LibraryCloudFolder
+
+        async with get_database().session() as session:
+            return (await session.get(LibraryCloudFolder, folder["id"])).dir_ids
+
+    assert {"d-inc", "d-dune", "d-opp"} <= set(call(client, dir_ids))
+
+    # 点名整个挂着的文件夹：等于列这个文件夹，子树外的变化这时才被发现
+    started = client.post(
+        f"/api/v1/libraries/{library_id}/scan", json={"cloud_paths": ["影视/电影"]}
+    )
+    assert started.status_code == 202, started.text
+    after = _wait_idle(client, library_id)
+    rows = ledger(client, library_id)
+    assert rows["f-opp"]["state"] == "missing"
+    assert after["cloud_folders"][0]["listed_at"] != folder["listed_at"]
+
+
+def test_scan_with_cloud_paths_rejects_paths_it_cannot_resolve(client, tmp_path):
+    library_id = _create_library(client, tmp_path)["id"]
+    url = f"/api/v1/libraries/{library_id}/scan"
+    outside = client.post(url, json={"cloud_paths": ["影视/剧集/某剧"]})
+    assert outside.status_code == 400 and "不在这个库挂的网盘文件夹里" in outside.text
+    missing = client.post(url, json={"cloud_paths": ["影视/电影/没有这个目录"]})
+    assert missing.status_code == 400 and "找不到文件夹" in missing.text
+    both = client.post(
+        url, json={"paths": [str(tmp_path / "staging" / "x")], "cloud_paths": ["影视/电影"]}
+    )
+    assert both.status_code == 422
 
 
 def test_folder_picker_overlap_guard_account_guard_and_unmount(client, tmp_path):

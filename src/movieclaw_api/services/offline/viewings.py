@@ -264,5 +264,6 @@ async def _apply_one(
             position_ms=record.position_ms,
             viewing_id=record.viewing_id,
             occurred_at=started if event is PLAYBACK_STARTED else updated,
+            watch_log=log,
         )
     return "applied" if newer else "stale"

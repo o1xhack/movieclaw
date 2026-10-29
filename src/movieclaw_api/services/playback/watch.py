@@ -290,7 +290,7 @@ async def _log_progress(
     position_ms: int | None,
     stopped: bool,
     completed: bool,
-) -> None:
+) -> PlaybackLog:
     now = utcnow()
     row = await _open_log(session, unit, member_id=member_id, device_id=client.device_id)
     if row is None:
@@ -314,6 +314,7 @@ async def _log_progress(
     row.completed = row.completed or completed
     if stopped:
         row.ended_at = now
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +484,7 @@ async def record_progress(
         files=played_files,
         contexts=contexts,
     )
-    await _log_progress(
+    watch_log = await _log_progress(
         session,
         unit,
         member_id=member_id,
@@ -512,6 +513,7 @@ async def record_progress(
                 file_id=file_id,
                 completed=newly_played,
                 position_ms=position_ms if position_ms is not None else runtime_ms,
+                watch_log=watch_log,
             )
     await session.commit()
     return row

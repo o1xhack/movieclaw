@@ -9,6 +9,7 @@ import { http } from '@kit.NetworkKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { PlaybackGuard } from './PlaybackGuard';
 import { PlayerPrefs, SubStyle } from './PlayerPrefs';
+import { MpvPlayer, PlayerEngine } from './MpvPlayer';
 import { Theme } from '../theme/AppTheme';
 import { Formatters } from '../common/Formatters';
 import { ShellChrome } from '../common/ShellChrome';
@@ -316,7 +317,7 @@ export struct PlayerPage {
   private navStack: NavPathStack = new NavPathStack();
   private chrome: ShellChrome = ShellChrome.shared;
   private started: boolean = false;
-  private avPlayer: media.AVPlayer | null = null;
+  private avPlayer: PlayerEngine | null = null;
   private surfaceId: string = '';
   /** 拿 surface id 的正规途径：XComponentController（`XComponentContext` 不是公开类型） */
   private surfaceController: XComponentController = new XComponentController();
@@ -455,8 +456,10 @@ export struct PlayerPage {
   private landscapeBtnX: number[] = [0, 0];
   private pipBtnX: number[] = [0, 0];
   private capsuleRowX: number[] = [0, 0];
+  private capsuleRowY: number[] = [0, 0];
   private capsuleRowWidth: number = 0;
   private skipBtnX: number[] = [0, 0];
+  private skipBtnY: number[] = [0, 0];
   private rewindBtnX: number[] = [0, 0];
   private playBtnX: number[] = [0, 0];
   private forwardBtnX: number[] = [0, 0];
@@ -910,9 +913,15 @@ export struct PlayerPage {
       return;
     }
     await this.releasePlayer();
-    const player: media.AVPlayer = await media.createAVPlayer();
+    // 按设置选引擎（PlayerPrefs.engine()：默认 mpv，'avplayer' 回系统播放器）
+    const player: PlayerEngine = PlayerPrefs.engine() === 'avplayer'
+      ? await media.createAVPlayer()
+      : await MpvPlayer.create();
     this.avPlayer = player;
     this.bindPlayerEvents(player);
+    if (player instanceof MpvPlayer) {
+      player.applySubStyle(this.subFontScale, this.subBottom, this.subBackground);
+    }
     player.url = url;
   }
 
@@ -926,8 +935,13 @@ export struct PlayerPage {
       return;
     }
     await this.releasePlayer();
-    const player: media.AVPlayer = await media.createAVPlayer();
+    const player: PlayerEngine = PlayerPrefs.engine() === 'avplayer'
+      ? await media.createAVPlayer()
+      : await MpvPlayer.create();
     this.avPlayer = player;
+    if (player instanceof MpvPlayer) {
+      player.applySubStyle(this.subFontScale, this.subBottom, this.subBackground);
+    }
     this.deferPrepare = subtitleFd >= 0;
     this.bindPlayerEvents(player);
     player.fdSrc = { fd: fd, offset: 0, length: OfflineDisk.fileSize(this.localMediaPath) };
@@ -946,7 +960,7 @@ export struct PlayerPage {
     }
   }
 
-  private bindPlayerEvents(player: media.AVPlayer): void {
+  private bindPlayerEvents(player: PlayerEngine): void {
     player.on('stateChange', (state: string): void => {
       if (state === 'initialized') {
         this.armWatchdog();
@@ -1044,6 +1058,13 @@ export struct PlayerPage {
       if (this.isClip() && !this.clipEnded && time >= this.clipEndMs) {
         this.clipEnded = true;
         player.pause();
+        // 卡片独占画面：开着的一并收掉；等双击的轻点计时器、长按判定计时器都别再触发
+        this.chromeVisible = false;
+        this.disarmHoldTimer();
+        if (this.singleTapTimer >= 0) {
+          clearTimeout(this.singleTapTimer);
+          this.singleTapTimer = -1;
+        }
       }
     });
     // 本机外挂字幕：系统只回调文本不代画，界面自己渲染（见 build 里的字幕条）
@@ -1118,7 +1139,7 @@ export struct PlayerPage {
   }
 
   private async releasePlayer(): Promise<void> {
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player === null) {
       return;
     }
@@ -1131,7 +1152,7 @@ export struct PlayerPage {
   }
 
   private togglePlay(): void {
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player === null) {
       return;
     }
@@ -1144,7 +1165,7 @@ export struct PlayerPage {
   }
 
   private seekTo(ms: number): void {
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player === null) {
       return;
     }
@@ -1453,13 +1474,14 @@ export struct PlayerPage {
     const context = getContext() as common.UIAbilityContext;
     const guard: PlaybackGuard = new PlaybackGuard(context,
       (): void => {
-        const player: media.AVPlayer | null = this.avPlayer;
-        if (player !== null) {
+        const player: PlayerEngine | null = this.avPlayer;
+        // 片段播完等用户按「重播 / 看全片」：通知栏的播放键不把播放唤起来越过片段终点
+        if (player !== null && !this.clipEnded) {
           player.play();
         }
       },
       (): void => {
-        const player: media.AVPlayer | null = this.avPlayer;
+        const player: PlayerEngine | null = this.avPlayer;
         if (player !== null) {
           player.pause();
         }
@@ -1551,7 +1573,7 @@ export struct PlayerPage {
    * 关字幕用 `deselectTrack`。
    */
   private async pickSubtitle(index: number): Promise<void> {
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     const view: PlaybackSessionView | null = this.session;
     if (player === null || view === null) {
       this.showSheet = false;
@@ -1656,7 +1678,7 @@ export struct PlayerPage {
   }
 
   /** 字幕加载完找轨号并选中（url / fd 两种加载方式共用） */
-  private async activateSubtitleTrack(player: media.AVPlayer, index: number): Promise<void> {
+  private async activateSubtitleTrack(player: PlayerEngine, index: number): Promise<void> {
     // 加载完再找出它的轨号
     const tracks: media.MediaDescription[] = await player.getTrackDescription();
     let found: number = -1;
@@ -1825,7 +1847,7 @@ export struct PlayerPage {
   }
 
   private beginHoldSpeed(): boolean {
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player === null || !this.playing || this.phase !== PlayerPhase.ready) {
       return false;
     }
@@ -1839,7 +1861,7 @@ export struct PlayerPage {
       return;
     }
     this.holdSpeedActive = false;
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player !== null) {
       player.setSpeed(media.PlaybackSpeed.SPEED_FORWARD_1_00_X);
     }
@@ -1877,6 +1899,33 @@ export struct PlayerPage {
   private onGesture(event: TouchEvent): void {
     const touch: TouchObject | undefined = event.changedTouches[0];
     if (touch === undefined) {
+      return;
+    }
+    /*
+     * 片段播完卡在「这一段看完了」上：手势全锁，只留卡上的「重播 / 看全片」和
+     * 系统返回。不锁的话双击还能把播放唤起来越过片段终点继续播、轻点还能把
+     * 控制层叫出来。Up/Cancel 仍要放行收尾——正在拖动/长按的触摸正好碰上片段
+     * 到点，跟踪态得正常复位（倍速收掉、进度条浮层收掉），否则 gestureTracking
+     * 卡死，重播之后整个手势层全废。
+     */
+    if (this.clipEnded) {
+      if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+        this.disarmHoldTimer();
+        if (this.gestureTracking) {
+          this.gestureTracking = false;
+          if (this.gestureIntent === 'hold') {
+            this.endHoldSpeed();
+          } else if (this.gestureIntent === 'barDrag') {
+            this.barDragging = false;
+            this.scrubMs = -1;
+          } else if (this.gestureIntent === 'scrub') {
+            this.scrubEnded(true);
+          } else if (this.gestureIntent === 'adjust') {
+            this.adjustEnded();
+          }
+          this.gestureIntent = 'undecided';
+        }
+      }
       return;
     }
     if (event.type === TouchType.Down) {
@@ -2094,6 +2143,7 @@ export struct PlayerPage {
   private handleBottomBarTap(x: number, y: number): void {
     const globalX: number = x + this.layerOriginX;
     if (this.currentSegment() !== null && this.skipBtnX[1] > this.skipBtnX[0]
+      && this.inBand(y, this.skipBtnY)
       && globalX >= this.skipBtnX[0] && globalX <= this.skipBtnX[1]) {
       this.armChromeTimer();
       const segment: PlaybackSegmentView | null = this.currentSegment();
@@ -2104,7 +2154,8 @@ export struct PlayerPage {
     }
     const rowLeft: number = this.capsuleRowX[0];
     const rowRight: number = this.capsuleRowX[1];
-    if (rowRight > rowLeft && globalX >= rowLeft && globalX <= rowRight && this.capsuleRowWidth > 0) {
+    if (rowRight > rowLeft && this.inBand(y, this.capsuleRowY)
+      && globalX >= rowLeft && globalX <= rowRight && this.capsuleRowWidth > 0) {
       const relX: number = globalX - rowLeft;
       const segW: number = this.capsuleRowWidth / 4;
       const idx: number = Math.min(3, Math.floor(relX / segW));
@@ -2409,7 +2460,7 @@ export struct PlayerPage {
     if (!state.ended_by_admin || this.phase === PlayerPhase.failed) {
       return;
     }
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player !== null) {
       player.pause();
     }
@@ -3016,7 +3067,7 @@ export struct PlayerPage {
 
   /** 片段重播：回片段起点再放 */
   private replayClip(): void {
-    const player: media.AVPlayer | null = this.avPlayer;
+    const player: PlayerEngine | null = this.avPlayer;
     if (player === null) {
       return;
     }
@@ -3075,6 +3126,11 @@ export struct PlayerPage {
     style.bottomPercent = this.subBottom;
     style.background = this.subBackground;
     PlayerPrefs.writeSubtitleStyle(style);
+    // mpv：样式直接交给 libass 渲染；AVPlayer 走上面的 @Local 变量自绘
+    const player: PlayerEngine | null = this.avPlayer;
+    if (player instanceof MpvPlayer) {
+      player.applySubStyle(this.subFontScale, this.subBottom, this.subBackground);
+    }
   }
 
   private toggleSubtitleBackground(): void {
@@ -3280,17 +3336,27 @@ export struct PlayerPage {
           this.ClipEndCard()
         }
         this.TopHud()
+        /*
+         * 片尾「即将播放」卡片（iOS PlayerUpNextCard）：独立浮层，不随控制层收起；
+         * 右下角、底栏上方。
+         *
+         * **必须用 hitTestBehavior(None) 的全屏容器做普通子节点，不能用 `.overlay()`**：
+         * overlay 的挂载层始终铺满宿主、zIndex=INT_MAX、hit=Default，builder 条件
+         * 不渲染时它也还在（dumpLayout 实证：全屏空 Stack 压在页面上）——整页的
+         * onClick 全被它吃掉，片段播完卡「重播/看全片」怎么点都没反应就是它干的。
+         * None 容器自身不吃触摸，触摸穿透给下层兄弟节点；卡片是它的子节点照常可点。
+         */
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          this.UpNextOverlay()
+        }
+        .width('100%')
+        .height('100%')
+        .hitTestBehavior(HitTestMode.None)
       }
       .width('100%')
       .height('100%')
       .backgroundColor('#000000')
       .expandSafeArea([SafeAreaType.SYSTEM])
-      /*
-       * 片尾「即将播放」卡片（iOS PlayerUpNextCard）：独立浮层，不随控制层收起；
-       * 右下角、底栏上方。overlay 只包卡片本身——卡片外的触摸落不到 overlay 上，
-       * 天然穿透到手势层。
-       */
-      .overlay(this.UpNextOverlay(), { align: Alignment.BottomEnd })
       /*
        * **一个组件只能绑一个 `bindSheet`**（后绑的覆盖前面的，第 23 轮在媒体库页踩过）。
        * 这里本来就绑了两个（字幕 / 详情），所以字幕面板一直打不开——合成单槽位 + 内容切换。
@@ -3542,6 +3608,7 @@ export struct PlayerPage {
                 .onAreaChange((_old: Area, newArea: Area) => {
                   const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
                   this.skipBtnX = [gx, gx + this.vpOf(newArea.width)];
+                  this.skipBtnY = this.bandOf(newArea);
                 })
             }
             .width('100%')
@@ -3605,6 +3672,7 @@ export struct PlayerPage {
           .onAreaChange((_old: Area, newArea: Area) => {
             const gx: number = this.vpOf(newArea.globalPosition?.x ?? 0);
             this.capsuleRowX = [gx, gx + this.vpOf(newArea.width)];
+            this.capsuleRowY = this.bandOf(newArea);
             this.capsuleRowWidth = this.vpOf(newArea.width);
           })
         }
@@ -3872,7 +3940,7 @@ export struct PlayerPage {
     .border({ width: 1, color: 'rgba(255,255,255,0.08)' })
   }
 
-  /** 片段播完卡（iOS PlayerClipEndCard）：重播这一段 / 看全片 */
+  /** 片段播完卡（iOS PlayerClipEndCard）：重播这一段 / 看全片 / 返回 */
   @Builder
   ClipEndCard() {
     Column({ space: 12 }) {
@@ -3906,6 +3974,19 @@ export struct PlayerPage {
           })
       }
       .width('100%')
+      /*
+       * 卡片期间手势层整体锁死（onGesture 的 clipEnded 守卫），顶栏返回键跟着控制层
+       * 一起唤不出来——iOS 靠系统左滑返回兜底，这里给个显式出口：低调的「返回」
+       * 文字键（次级动作，不与重播/看全片抢主次），点了退回刷片页。
+       */
+      Text('返回')
+        .fontSize(13)
+        .fontColor('rgba(255,255,255,0.55)')
+        .height(34)
+        .padding({ left: 20, right: 20 })
+        .onClick(() => {
+          this.navStack.pop();
+        })
     }
     .width('70%')
     .padding(20)
