@@ -1,6 +1,6 @@
 # Luca Cinema 个人构建与安装记录
 
-基于 MovieClaw v0.41.0 / iOS 0.9.2，最近测试构建 0.9.2（构建 11）已安装 iPhone Air；此前主手机确认版本为 0.9.2（构建 10）；最近已验证的 TestFlight 为 0.7.0（构建 5），本轮未上传 TestFlight，最低 iOS 26。
+当前源码基于 MovieClaw v0.44.0 / iOS 0.12.0，本地构建为 0.12.0（14）。最近已验证的内部 TestFlight 仍为 0.11.0（13），本轮尚未上传；最低 iOS 26。
 
 当前订阅接入只在 Web / 电脑助手添加和管理；iOS 读取服务器已有模型，并保留模型与思考强度选择。下方 0.7.0 手机内授权记录属于历史版本，已由本版替代。
 
@@ -215,3 +215,17 @@ NAS 从应用 overlay 0.42.0 / 定制 runtime 23 镜像升级到官方 0.43.0 ru
 私人 `luca-cinema-chatgpt` 分支合入上游 `origin/main` 的 `6dc217dc`，合并提交 `ae153ceb`，品牌生成文件提交 `96761167` 并推送到 `o1xhack/movieclaw`。保留 Luca Cinema 名称、LC 图标、独立 Bundle ID 与签名配置、播放器和离线观看改动；上游 iOS 版本更新至 0.11.0。离线观看完成事件相关 5 个定向用例通过，Xcode 27.1 Release 归档与严格签名校验通过。归档主 App 为 `com.o1xhack.lucacinema.app`、0.11.0（13），通知扩展 ID 同属该前缀，设备族包含 iPhone / iPad。源图 1024×1024 无 Alpha，归档 120×120 图标已查看且像素完全不透明，Apple CDN 图标回读也为 LC。
 
 2026-10-26 本地 22:37 上传；ASC upload/build ID `50f88daf-2403-43b3-b19a-eb170c4a349d` 最终为 `COMPLETE` / `VALID`，pre-release train 为 iOS 0.11.0，`internalBuildState=IN_BETA_TESTING`，现有内部组 `Luca Personal` 含此构建（all-builds）。未提交 App Store 审核，也未加入外部测试组。构建、导出日志、归档及图标核验文件位于 `/Volumes/StudioSSD/Developer/BuildScratch/LucaCinema/ios-v0.11.0-build13`。真实 iPhone 安装与播放仍需单独 QA。
+
+## MovieClaw 0.44.0 与 Luca Cinema iOS 0.12.0（14）（2026-10-29）
+
+完整合入正式 `ios-v0.12.0` / `v0.44.0`（`2a6e6d2a58129a305e53f78639e7dafd82a1ec82`），私人合并提交 `3d9da66e416b49bbbc6de78591e52a7a0bb30030`。保留 Luca 名称、LC 图标、独立 Bundle ID / App Group、签名和许可证；播放器、离线下载队列、播出日历及 iPhone Duo 布局随上游合入。两处服务器冲突合并保留原始播放位置、离线 viewing_id 和正式 watch_source_ids。
+
+NAS 基于官方 0.44.0 镜像摘要 `sha256:42bd98d35062d93bc5023a242c085871adf0199e38f374d11177f56bf6cc36d2`，派生镜像 `local/movieclaw:v0.44.0-preserved-20261029`（ID `43afe9166002`）保留既有离线补丁和外部下载过滤；Trakt #1063 直接沿用正式实现。只重建 MovieClaw，qBittorrent ID 与启动时间不变。停服一致备份为 `/volume1/docker/movieclaw/upgrade044-20261029/backup/data-before-v044.tar`（231219200 字节、84 个归档条目），旧 Compose、密钥与镜像均保留。回退必须配合匹配的数据和旧镜像，不能用旧代码直接打开已迁移数据库，也不能在有新用户数据后不加核对地覆盖整库。
+
+禁网副本迁移和生产检查均通过：迁移头 `d7a25e81c4f0`、quick_check=ok、凭据可解密；2 个库、6517 文件、471 媒体、2466 播放状态、32 播放流水、2634 条导入历史、2 个模型供应商和 1 个站点配置数量一致。Trakt 账号密文摘要一致，插件 0.3.0-beta.3 active；用户现有偏好保留（手动标已看和收藏开启，取消已看关闭）。没有重新绑定或触发批量同步。服务 healthy、restarts=0，首页 HTTP 200；95 个受管下载任务、0 external。5 个实际补丁文件的摘要与构建清单一致，catalog 接口含 source_ids。
+
+106 项后端回归、7 项私人离线专项和 11 项真实宿主插件集成通过（Trakt 模拟）。iOS 使用 Xcode 27.1 / iOS 27.1 SDK，604 项 Swift Testing、1 项中文 XCTest 和 22 项英文 XCTest 分语言复验通过；中文时间用例使用其预期的 Asia/Shanghai 环境。首轮混合语种/默认时区的失败日志保留，没有修改产品时间语义来迎合测试。8 项依赖锁定测试通过，AetherEngine 为 `0912813a54e9febe22be07e5c337bb58dfa7b2e5`，FFmpegBuild 为 3.10.1。
+
+本地 0.12.0（14）Archive 与 IPA 导出完成，主 App 和两个通知扩展的版本、Bundle ID、严格签名、许可证及隐私清单已核对。本轮未上传 TestFlight、未提交 App Store 审核；真实手机安装/登录/播放仍待 QA，手机现有安装不会因源码同步自动更新。
+
+证据及产物目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw-upgrade/v044-20261029`。归档在 `ios-build14/LucaCinema.xcarchive`，导出包在 `ios-build14/Export`，结果为 `ios-tests/TestsChinese.xcresult` 和 `TestsEnglish.xcresult`。NAS 构建、迁移、验证和备份材料均在 `/volume1/docker/movieclaw/upgrade044-20261029`。
