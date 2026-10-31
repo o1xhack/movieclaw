@@ -238,3 +238,11 @@ NAS 基于官方 0.44.0 镜像摘要 `sha256:42bd98d35062d93bc5023a242c085871adf
 验证：Xcode 27.1 / iOS Simulator 27.1 编译成功；13 项 ServerRoutesTests 全部通过，包含 `issue1089EndToEnd` 本地健康接口与 VPN 网络切换场景；8 项依赖锁定检查和合并 diff 检查通过。发现页 UI 用例已合入，本轮未执行；未进行真机播放、Archive 或上传 TestFlight。此前 TestFlight 构建仍为 0.12.0（14）。
 
 证据：`/Volumes/StudioSSD/Developer/BuildScratch/LucaCinema/sync-ios0121-20261030` 下的 `routes-tests.log`、`RoutesTests.xcresult` 和 `build-settings.log`。
+
+## iOS 0.12.1（15）内部 TestFlight（2026-10-30）
+
+按用户要求，基于 `1d962b99f` 归档并上传 Luca Cinema 0.12.1（15）。Xcode 27.1 Release Archive 与 App Store Connect 方式 IPA 导出成功；主 App、两个通知扩展的版本、独立 Bundle ID 和严格签名校验通过，设备族为 iPhone / iPad，字体、许可证、隐私清单均进入归档。源 LC 图标、逆优化后的归档图标和 Apple CDN 图标均已查看，源图及编译图无 Alpha。
+
+上传 / build ID：`9004ad4d-322d-4963-9856-3df322d3f0dd`。Apple 上传状态 COMPLETE，构建 VALID / APP_STORE_ELIGIBLE，内部状态 IN_BETA_TESTING。完整组关系回读确认仅有原 Luca Personal 内部组（all-builds），没有加入外部组或提交 App Store 审核。已填中文和英文测试说明；真机登录、VPN 切换及播放仍待人工 QA。
+
+产物和验证记录：`/Volumes/StudioSSD/Developer/BuildScratch/LucaCinema/testflight-0.12.1-15`。IPA SHA-256：`d59a22dffc492f5a008a815b2aa8f9294f5974c650d19b0f791e11382ed79afe`。
