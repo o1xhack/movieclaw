@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "movieclaw"
-version = "0.44.0"
+version = "0.45.0"
 description = "Best-practice Python HTTP service template powered by FastAPI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -129,6 +129,8 @@ movieclaw_agent = ["builtin-skills/**/*"]
 movieclaw_plugins = ["*/movieclaw-plugin.toml"]
 # 网页主题的 CSS 契约表（docs/design/theme-plugins.md §4.4）
 movieclaw_sdk = ["theme_css.json"]
+# LLM 供应商预设与公共模型目录快照（docs/design/llm-model-catalog.md §9.1）
+movieclaw_llm = ["providers/presets/*.yaml", "providers/catalog/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

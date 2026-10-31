@@ -67,6 +67,8 @@ export class SettingsCatalog {
       new SettingsGroup('通知与集成', [
         new SettingsSection('im-push', '消息推送',
           '微信 / Telegram / Discord / 飞书 推送与 AI 对话', 'sys.symbol.bell'),
+        new SettingsSection('notify', '系统通知',
+          '本机系统通知：下载完成、入库、今天有可看的与后台任务', 'sys.symbol.bell_badge_local', false),
         new SettingsSection('webhook', 'Webhook',
           '向外部服务推送播放、收藏等事件', 'sys.symbol.paperplane'),
         new SettingsSection('llm', '模型接入',
@@ -205,6 +207,7 @@ export struct SettingsIndexPage {
         // 内容从 y=0 铺到标题栏下面：首屏用 contentStartOffset 让开标题栏，滚动时产生渐变
         .contentStartOffset(AppNavBar.contentTop)
         .padding({ left: 16, right: 16, top: 8 })
+        .id('app-settings-list')
         .contentEndOffset(Theme.tabBarInset)
         .scrollBar(BarState.Off)
       }
@@ -295,6 +298,7 @@ export struct SettingsIndexPage {
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
       Toggle({ type: ToggleType.Switch, isOn: !this.tabBarStyle.floating })
+      .id('app-classic-tabs-toggle')
       .attributeModifier(new GlassSwitchModifier())
       .onChange((on: boolean): void => {
         TabBarStyle.shared().setFloating(!on);
@@ -374,6 +378,9 @@ export struct SettingsIndexPage {
   private iconFor(symbol: string): Resource {
     if (symbol === 'sys.symbol.bell') {
       return $r('sys.symbol.bell');
+    }
+    if (symbol === 'sys.symbol.bell_badge_local') {
+      return $r('sys.symbol.bell_badge_local');
     }
     if (symbol === 'sys.symbol.chevron_left') {
       return $r('sys.symbol.chevron_left');
