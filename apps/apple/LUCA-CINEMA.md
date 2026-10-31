@@ -229,3 +229,12 @@ NAS 基于官方 0.44.0 镜像摘要 `sha256:42bd98d35062d93bc5023a242c085871adf
 本地 0.12.0（14）Archive 与 IPA 导出完成，主 App 和两个通知扩展的版本、Bundle ID、严格签名、许可证及隐私清单已核对。2026-10-29 按用户要求上传同一签名包（SHA256 `a74c4ed6ec392738cbf53a0f4818c2ea3f15086011ee86d6d2df1d10cde6ef6c`），upload/build ID 为 `75c93c2a-dbad-477f-aaac-2f606c77d619`。Apple 处理完成，构建为 VALID、内部状态 IN_BETA_TESTING；组关系完整回读确认只有原 Luca Personal 内部组（`9bcb683d-a22a-47fc-8d3c-ff4206135f25`，all-builds），没有加入外部组。Apple 处理后的图标已查看，仍为正确 LC 图标。可以通过原 TestFlight 更新；未提交 App Store 审核，真实手机安装/登录/播放仍待 QA。
 
 证据及产物目录：`/Volumes/StudioSSD/Developer/BuildScratch/MovieClaw-upgrade/v044-20261029`。归档在 `ios-build14/LucaCinema.xcarchive`，导出包在 `ios-build14/Export`，结果为 `ios-tests/TestsChinese.xcresult` 和 `TestsEnglish.xcresult`；TestFlight 上传回执、处理结果、组关系及 Apple 图标在 `testflight14`。NAS 构建、迁移、验证和备份材料均在 `/volume1/docker/movieclaw/upgrade044-20261029`。
+# 上游 iOS 0.12.1 同步（2026-10-30）
+
+本轮合入官方稳定标签 `ios-v0.12.1`（`b3f86f98492b884aac6fcca515ef53ba94a4586c`，对应 v0.45.0 发布点），没有纳入标签之后的 main 改动。修复代理 VPN 被误认为回家隧道、VPN 开关后未立即重选地址，以及发现页标题菜单收起后的横向跳动。服务端最低要求仍为 0.28.0；本轮没有部署 NAS。
+
+合并无冲突。此前相对上游的 19 个 Apple 定制文件逐项比较，仅 `project.yml` 的版本号变为 0.12.1；Luca 名称、LC 图标、播放器及离线改动保持。原私人签名配置保留且不入 Git，生成工程构建设置确认独立 Bundle ID 为 `com.o1xhack.lucacinema.app`。工程已重新生成，AetherEngine 版本锁定不变。
+
+验证：Xcode 27.1 / iOS Simulator 27.1 编译成功；13 项 ServerRoutesTests 全部通过，包含 `issue1089EndToEnd` 本地健康接口与 VPN 网络切换场景；8 项依赖锁定检查和合并 diff 检查通过。发现页 UI 用例已合入，本轮未执行；未进行真机播放、Archive 或上传 TestFlight。此前 TestFlight 构建仍为 0.12.0（14）。
+
+证据：`/Volumes/StudioSSD/Developer/BuildScratch/LucaCinema/sync-ios0121-20261030` 下的 `routes-tests.log`、`RoutesTests.xcresult` 和 `build-settings.log`。
