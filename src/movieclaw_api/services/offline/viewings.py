@@ -164,7 +164,7 @@ async def _apply_one(
     runtime_ms = await playback_state.unit_runtime_ms(session, unit, files=played_files)
     runtime_ms = runtime_ms or record.duration_ms
     completion_percent, completion_position_ms = await completion_options(
-        session, played_files, runtime_ms
+        session, played_files, runtime_ms, file_id=record.file_id
     )
     # 客户端的 completed 可能只是播放器自己的百分比估算；有实际位置时以服务器规则为准。
     completion = resolve_progress(

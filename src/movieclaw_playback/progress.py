@@ -69,8 +69,9 @@ def resolve_progress(
         if valid_completion
         else pct > completion_percent
     )
-    # 100% 表示真正播到结尾，不沿用默认策略的最后一秒容差。
-    at_end = position_ms >= runtime_ms - (0 if completion_percent == 100 else 1000)
+    # 库内片长只有整秒精度（原盘还会四舍五入）；100% 也须保留这一秒容差，
+    # 否则 600.6 秒的文件被记为 601 秒后，实际播完仍永远到不了阈值。
+    at_end = position_ms >= runtime_ms - 1000
     if completed or at_end:
         return ProgressOutcome(position_ms=0, played=True)
     if (

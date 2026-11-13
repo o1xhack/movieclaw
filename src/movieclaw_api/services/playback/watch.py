@@ -472,7 +472,7 @@ async def record_progress(
     played_files = _played_files(files, file_id)
     runtime_ms = await playback_state.unit_runtime_ms(session, unit, files=played_files)
     completion_percent, completion_position_ms = await completion_options(
-        session, played_files, runtime_ms
+        session, played_files, runtime_ms, file_id=file_id
     )
     row, newly_played = await playback_state.record_playback_progress(
         session,

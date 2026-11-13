@@ -8,11 +8,17 @@ from movieclaw_db.models import LibraryFile
 
 
 async def completion_options(
-    session: AsyncSession, files: list[LibraryFile], runtime_ms: int | None
+    session: AsyncSession,
+    files: list[LibraryFile],
+    runtime_ms: int | None,
+    *,
+    file_id: int | None = None,
 ) -> tuple[float, int | None]:
     policy = await get_setting_store().get(PlaybackPolicySetting)
     threshold = policy.played_threshold_percent
     if not policy.played_use_outro or len(files) != 1 or not runtime_ms:
+        return threshold, None
+    if file_id is not None and files[0].id != file_id:
         return threshold, None
     # 复用播放下发的有效性检查：仅已启用识别的剧集库、当前文件/算法的成功结果。
     # 没有确切版本时不借用其他片源的片尾；电影、关闭、过期结果都回退百分比。
