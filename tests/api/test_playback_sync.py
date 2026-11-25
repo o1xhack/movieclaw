@@ -181,6 +181,13 @@ def test_pending_import_cannot_follow_a_reused_member_id(client):
     assert reply.status_code == 200, reply.text
     assert reply.json()["data"]["outcomes"][0]["status"] == "conflict"
     assert c.portal.call(facts) == ([], [], [])
+    reply = c.post(
+        BASE + "/import",
+        json={**payload, "expected_member_created_at": "0001-01-01T00:00:00+01:00"},
+    )
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["data"]["outcomes"][0]["status"] == "conflict"
+    assert c.portal.call(facts) == ([], [], [])
     new_member = c.get(member_url).json()["data"]
     payload["expected_member_created_at"] = new_member["created_at"]
     reply = c.post(BASE + "/import", json=payload)

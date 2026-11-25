@@ -292,6 +292,10 @@ async def import_records(
     # 与成员删除的清理顺序一致，避免后发的旧任务写入同号的新成员。
     media_item_ids = [record.media_item_id for record in payload.records]
     if payload.expected_member_created_at is not None:
+        try:
+            expected_created_at = naive(payload.expected_member_created_at)
+        except OverflowError:
+            return [SyncOutcome(status="conflict") for _ in payload.records]
         await playback_state.lock_titles(session, payload.member_id, media_item_ids)
         member = await session.get(
             Member, payload.member_id, with_for_update=True, populate_existing=True
@@ -299,7 +303,7 @@ async def import_records(
         if (
             member is None
             or member.status != "active"
-            or member.created_at != naive(payload.expected_member_created_at)
+            or member.created_at != expected_created_at
         ):
             return [SyncOutcome(status="conflict") for _ in payload.records]
     owner = await target(session, payload.member_id)
