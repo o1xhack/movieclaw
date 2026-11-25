@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select, text
@@ -30,8 +30,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from movieclaw_api.schemas.playback_sync import SyncChangeIn, SyncStateIn
-from movieclaw_api.services import playback_sync
+from movieclaw_api.schemas.playback_sync import SyncChangeIn, SyncImportIn, SyncStateIn
+from movieclaw_api.services import members, playback_sync
 from movieclaw_api.services.auth import Principal
 from movieclaw_api.services.library.reanchor import migrate_watch_state
 from movieclaw_api.services.playback_up_next import continue_anchor
@@ -42,7 +42,9 @@ from movieclaw_db.models import (
     Library,
     LibraryFile,
     MediaItem,
+    Member,
     PlaybackState,
+    WatchRecord,
 )
 from movieclaw_playback import state as playback_state
 
@@ -342,3 +344,69 @@ def test_reanchor_waits_for_a_concurrent_uncommitted_play_and_copies_the_cleared
     blocked = loop.run_until_complete(scenario())
     assert blocked, "迁移没等并发播放提交就读了旧标记"
     assert loop.run_until_complete(_flags(sessions, show)) == {1: False, 2: False, 3: False}
+
+
+def test_member_deletion_blocks_guarded_import_during_cleanup(db, monkeypatch):
+    loop, sessions, show = db
+    monkeypatch.setattr(members.avatar_media, "delete_avatar", lambda _stem: None)
+    monkeypatch.setattr(members.appearance_media, "remove_member_gallery", lambda _id: None)
+    delete = members.MemberRepository.delete
+
+    async def run():
+        reached_final_delete = asyncio.Event()
+        resume_delete = asyncio.Event()
+
+        async def pause_before_delete(repo, member):
+            reached_final_delete.set()
+            await resume_delete.wait()
+            return await delete(repo, member)
+
+        monkeypatch.setattr(members.MemberRepository, "delete", pause_before_delete)
+        async with sessions() as session:
+            member = Member(username="test-member", password_hash="unused")
+            session.add(member)
+            await session.commit()
+            member_id = member.id
+            created_at = member.created_at.replace(tzinfo=UTC)
+        payload = SyncImportIn.model_validate(
+            {
+                "member_id": member_id,
+                "expected_member_created_at": created_at,
+                "records": [
+                    {
+                        "media_item_id": show,
+                        "kind": "tv",
+                        "tmdb_id": 200,
+                        "season": 1,
+                        "episode": 1,
+                        "source_id": "old-member-watch",
+                        "watched_at": datetime(2020, 1, 1, tzinfo=UTC),
+                        "expected_updated_at": None,
+                    }
+                ],
+            }
+        )
+
+        async def remove():
+            async with sessions() as session:
+                await members.delete_member(session, member_id)
+
+        async def apply():
+            async with sessions() as session:
+                return await playback_sync.import_records(session, ADMIN, payload)
+
+        removal = asyncio.create_task(remove())
+        await asyncio.wait_for(reached_final_delete.wait(), 5)
+        queued_import = asyncio.create_task(apply())
+        try:
+            await asyncio.sleep(BLOCKED_FOR)
+            assert not queued_import.done()
+        finally:
+            resume_delete.set()
+            outcomes = await asyncio.gather(removal, queued_import)
+        assert outcomes[1][0].status == "conflict"
+        async with sessions() as session:
+            assert await session.get(Member, member_id) is None
+            assert await session.scalar(select(WatchRecord)) is None
+
+    loop.run_until_complete(run())

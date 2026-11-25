@@ -225,16 +225,18 @@ async def delete_member(session: AsyncSession, member_id: int) -> None:
 
     from movieclaw_db.models import Collection, member_scoped_models
 
-    # 与带身份校验的观看历史导入串行。先锁成员，再清理其个人数据。
-    member = await session.get(Member, member_id, with_for_update=True, populate_existing=True)
-    if member is None:
-        raise NotFoundException(message_key="errors.members.missing")
+    member = await get_member(session, member_id)
+    created_at = member.created_at
     avatar_media.delete_avatar(avatar_media.member_stem(member_id))
     appearance_media.remove_member_gallery(member_id)
     await _drop_jellyfin_devices(session, member_id)
     # 登录设备也在成员级表里、会被下面的统一清理删掉；这里先走一遍正式注销，
     # 让他正在播的流、正在跑的转码连接当场断开（统一清理只删行，不管这些）
     await login_devices.revoke_for_member(session, member_id)
+    # 上面的凭证注销会提交。这个成员行锁必须覆盖下方的个人数据清理及最终删除。
+    member = await session.get(Member, member_id, with_for_update=True, populate_existing=True)
+    if member is None or member.created_at != created_at:
+        raise NotFoundException(message_key="errors.members.missing")
     for model in member_scoped_models():
         await session.execute(sa_delete(model).where(model.member_id == member_id))
     # 他建的全家合集是公共资源，留下来转归超管；不转的话 SQLite 复用行 id，
