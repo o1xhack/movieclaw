@@ -234,6 +234,14 @@ async def delete_member(session: AsyncSession, member_id: int) -> None:
     # 让他正在播的流、正在跑的转码连接当场断开（统一清理只删行，不管这些）
     await login_devices.revoke_for_member(session, member_id)
     # 上面的凭证注销会提交。这个成员行锁必须覆盖下方的个人数据清理及最终删除。
+    if session.bind is not None and session.bind.dialect.name == "sqlite":
+        # SQLite 没有行锁；通过不改任何数据的 UPDATE 在重新读取成员前获取写锁。
+        await session.execute(
+            sa_update(Member)
+            .where(Member.id.is_(None))
+            .values(token_version=Member.token_version)
+            .execution_options(synchronize_session=False)
+        )
     member = await session.get(Member, member_id, with_for_update=True, populate_existing=True)
     if member is None or member.created_at != created_at:
         raise NotFoundException(message_key="errors.members.missing")

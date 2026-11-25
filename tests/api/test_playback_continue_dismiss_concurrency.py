@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
@@ -408,5 +408,55 @@ def test_member_deletion_blocks_guarded_import_during_cleanup(db, monkeypatch):
         async with sessions() as session:
             assert await session.get(Member, member_id) is None
             assert await session.scalar(select(WatchRecord)) is None
+
+    loop.run_until_complete(run())
+
+
+def test_member_id_cannot_be_replaced_between_recheck_and_deletion(db, monkeypatch):
+    loop, sessions, _show = db
+    monkeypatch.setattr(members.avatar_media, "delete_avatar", lambda _stem: None)
+    monkeypatch.setattr(members.appearance_media, "remove_member_gallery", lambda _id: None)
+    get = AsyncSession.get
+
+    async def run():
+        checked = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def pause_after_check(session, model, identity, **kwargs):
+            row = await get(session, model, identity, **kwargs)
+            if model is Member and kwargs.get("with_for_update"):
+                checked.set()
+                await resume.wait()
+            return row
+
+        monkeypatch.setattr(AsyncSession, "get", pause_after_check)
+        async with sessions() as session:
+            old = Member(username="old", password_hash="unused")
+            session.add(old)
+            await session.commit()
+            member_id = old.id
+
+        async def remove():
+            async with sessions() as session:
+                await members.delete_member(session, member_id)
+
+        async def replace():
+            async with sessions() as session:
+                await session.execute(delete(Member).where(Member.id == member_id))
+                session.add(Member(id=member_id, username="new", password_hash="unused"))
+                await session.commit()
+
+        removal = asyncio.create_task(remove())
+        await asyncio.wait_for(checked.wait(), 5)
+        replacement = asyncio.create_task(replace())
+        try:
+            await asyncio.sleep(BLOCKED_FOR)
+            assert not replacement.done()
+        finally:
+            resume.set()
+            await asyncio.gather(removal, replacement)
+        async with sessions() as session:
+            current = await session.get(Member, member_id)
+            assert current is not None and current.username == "new"
 
     loop.run_until_complete(run())

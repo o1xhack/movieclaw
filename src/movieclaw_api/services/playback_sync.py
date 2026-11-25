@@ -290,10 +290,9 @@ async def import_records(
 ) -> list[SyncOutcome]:
     # 先锁再读成员：SQLite 的作品锁也是事务写锁。Postgres 用成员行锁保护身份，
     # 与成员删除的清理顺序一致，避免后发的旧任务写入同号的新成员。
-    await playback_state.lock_titles(
-        session, payload.member_id, [record.media_item_id for record in payload.records]
-    )
+    media_item_ids = [record.media_item_id for record in payload.records]
     if payload.expected_member_created_at is not None:
+        await playback_state.lock_titles(session, payload.member_id, media_item_ids)
         member = await session.get(
             Member, payload.member_id, with_for_update=True, populate_existing=True
         )
@@ -309,6 +308,8 @@ async def import_records(
     outcomes: list[SyncOutcome] = []
     # 同一批的同一单元共用扫描时的版本；第二条重看不能与本批第一条自己产生冲突。
     versions = {}
+    if payload.expected_member_created_at is None:
+        await playback_state.lock_titles(session, payload.member_id, media_item_ids)
     for record in payload.records:
         prior = (
             await session.execute(
