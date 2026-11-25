@@ -225,7 +225,10 @@ async def delete_member(session: AsyncSession, member_id: int) -> None:
 
     from movieclaw_db.models import Collection, member_scoped_models
 
-    member = await get_member(session, member_id)
+    # 与带身份校验的观看历史导入串行。先锁成员，再清理其个人数据。
+    member = await session.get(Member, member_id, with_for_update=True, populate_existing=True)
+    if member is None:
+        raise NotFoundException(message_key="errors.members.missing")
     avatar_media.delete_avatar(avatar_media.member_stem(member_id))
     appearance_media.remove_member_gallery(member_id)
     await _drop_jellyfin_devices(session, member_id)
