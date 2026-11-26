@@ -2089,6 +2089,31 @@ def test_pgs_polling_reuses_cold_extraction_across_track_switch(client, tmp_path
     assert len(commands) == 1
 
 
+def test_pgs_polling_keeps_remote_source_on_the_blocking_path(client, tmp_path, monkeypatch):
+    file_id = seed(client, tmp_path, strm=True)
+    monkeypatch.setattr(routes_playback, "_PGS_POLL_WAIT_SECONDS", 0)
+
+    async def set_tracks():
+        async with get_database().session() as session:
+            file = await session.get(LibraryFile, file_id)
+            file.subtitle_streams = [{"codec": "hdmv_pgs_subtitle"}]
+            await session.commit()
+
+    async def failed_extract(_file, _index):
+        await asyncio.sleep(0)
+        return None
+
+    client.portal.call(set_tracks)
+    monkeypatch.setattr(routes_playback, "extract_embedded_subtitle_async", failed_extract)
+    token = client.portal.call(
+        partial(issue_stream_token, member_id=0, file_id=file_id, session_id=None)
+    )
+    response = client.get(
+        f"{_PB}/files/{file_id}/subtitles?track=embedded:0&token={token}&poll=true"
+    )
+    assert response.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_embedded_subtitle_disconnect_cancels_extraction_without_asgi_cancel(
     monkeypatch,
