@@ -2029,6 +2029,63 @@ def test_disc_pgs_subtitle_is_extracted_from_the_main_playlist(client, tmp_path,
     assert f"file '{disc}/STREAM/00001.m2ts'" in inputs[0]
 
 
+def test_pgs_polling_reuses_cold_extraction_across_track_switch(client, tmp_path, monkeypatch):
+    file_id = seed(client, tmp_path, container="m2ts")
+    tracks = [b"PG" + bytes([i, 255]) for i in range(2)]
+    monkeypatch.setattr(routes_playback, "_PGS_POLL_WAIT_SECONDS", 0.15)
+    monkeypatch.setattr(media_extract.shutil, "which", lambda _name: "/fake/ffmpeg")
+    monkeypatch.setattr(media_extract, "cache_dir", lambda: tmp_path / "subs-cache")
+    commands = []
+
+    async def set_tracks():
+        async with get_database().session() as session:
+            file = await session.get(LibraryFile, file_id)
+            file.subtitle_streams = [{"codec": "hdmv_pgs_subtitle"} for _ in tracks]
+            await session.commit()
+        return asyncio.Event()
+
+    release = client.portal.call(set_tracks)
+
+    class SlowFFmpeg:
+        returncode = 0
+
+        async def communicate(self):
+            await release.wait()
+            for path, raw in zip(commands[0], tracks, strict=True):
+                path.write_bytes(raw)
+            return b"", b""
+
+    async def start_ffmpeg(*argv, **_kwargs):
+        commands.append([Path(arg) for arg in argv if arg.endswith(".sup")])
+        return SlowFFmpeg()
+
+    monkeypatch.setattr(media_extract.asyncio, "create_subprocess_exec", start_ffmpeg)
+    token = client.portal.call(
+        partial(issue_stream_token, member_id=0, file_id=file_id, session_id=None)
+    )
+    url = f"{_PB}/files/{file_id}/subtitles"
+    params = {"token": token, "poll": "true"}
+    try:
+        for index in (0, 1):
+            response = client.get(url, params={**params, "track": f"embedded:{index}"})
+            assert response.status_code == 202
+            assert response.headers["cache-control"] == "no-store"
+            assert response.content == b""
+        assert len(commands) == 1
+    finally:
+        client.portal.call(release.set)
+
+    # 完成后可以一次取到刚换上的轨，也可以按原协议读取缓存。
+    for index in (1, 0):
+        params = {"token": token, "track": f"embedded:{index}"}
+        if index == 1:
+            params["poll"] = "true"
+        response = client.get(url, params=params)
+        assert response.status_code == 200
+        assert response.content == tracks[index]
+    assert len(commands) == 1
+
+
 @pytest.mark.asyncio
 async def test_embedded_subtitle_disconnect_cancels_extraction_without_asgi_cancel(
     monkeypatch,
