@@ -32,6 +32,7 @@ from tests.e2e.test_media_share_browser import (
     _wait_for,
     _wait_http,
 )
+from tests.e2e.test_player_pgs_browser import _open_subtitle_menu
 from tests.playback.disc_fixture import Clip, make_bdmv, sup_presentations
 
 pytest.importorskip("playwright.sync_api")
@@ -434,6 +435,9 @@ def test_cold_m2ts_polls_for_pgs_and_renders_without_restarting_extraction(stack
             watch = _Watch(page)
             page.goto(f"{base}/play/{item}")
             _play_current_video(page)
+            # 单文件的 MPEG-TS 未标记默认轨，要像用户一样手动开启。
+            _open_subtitle_menu(page)
+            page.get_by_role("button", name="PGS 图形").click()
             preparing = page.get_by_test_id("subtitle-preparing")
             expect(preparing).to_be_visible()
             _wait_in_page(
