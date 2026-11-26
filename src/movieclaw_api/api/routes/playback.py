@@ -2824,7 +2824,7 @@ async def get_playback_subtitle(
         Query(ge=0, description="片段窗口起点（文件时间，毫秒）：与 end_ms 同给时只抽这一段"),
     ] = None,
     end_ms: Annotated[int | None, Query(ge=0, description="片段窗口终点（文件时间，毫秒）")] = None,
-    poll: Annotated[bool, Query(description="内封 PGS 未就绪时返回 202，供网页播放器轮询")] = False,
+    poll: Annotated[bool, Query(description="单文件的内封 PGS 未就绪时返回 202")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     """字幕**永远旁挂**，绝不烧录（硬边界 1）——烧录会把任何档位拖进全转码。
@@ -2851,7 +2851,10 @@ async def get_playback_subtitle(
                 file, index, start_ms or 0, end_ms or 0
             )
         elif index is not None:
-            poll_pgs = poll and subtitle_format(track_codec(file, index)) == "sup"
+            # 盘目录和 ISO 要先解析播放列表，预处理可能比轮询窗口还久，中止会一直重做。
+            poll_pgs = (
+                poll and not file.is_disc() and subtitle_format(track_codec(file, index)) == "sup"
+            )
             wait = asyncio.timeout(_PGS_POLL_WAIT_SECONDS if poll_pgs else None)
             try:
                 async with wait:

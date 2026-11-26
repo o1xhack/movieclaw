@@ -2017,11 +2017,13 @@ def test_disc_pgs_subtitle_is_extracted_from_the_main_playlist(client, tmp_path,
     monkeypatch.setattr(media_extract.shutil, "which", lambda _n: "/fake/ffmpeg")
     monkeypatch.setattr(media_extract.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(media_extract, "cache_dir", lambda: tmp_path / "subs-cache")
+    # 盘目录的解析不受单文件轮询等待窗口限制，即使新版网页带上 poll。
+    monkeypatch.setattr(routes_playback, "_PGS_POLL_WAIT_SECONDS", 0)
     token = client.portal.call(
         partial(issue_stream_token, member_id=0, file_id=file_id, session_id=None)
     )
 
-    resp = client.get(f"{_PB}/files/{file_id}/subtitles?track=embedded:0&token={token}")
+    resp = client.get(f"{_PB}/files/{file_id}/subtitles?track=embedded:0&token={token}&poll=true")
 
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"].startswith("application/octet-stream")
@@ -2076,6 +2078,7 @@ def test_pgs_polling_reuses_cold_extraction_across_track_switch(client, tmp_path
         client.portal.call(release.set)
 
     # 完成后可以一次取到刚换上的轨，也可以按原协议读取缓存。
+    monkeypatch.setattr(routes_playback, "_PGS_POLL_WAIT_SECONDS", 2)
     for index in (1, 0):
         params = {"token": token, "track": f"embedded:{index}"}
         if index == 1:
